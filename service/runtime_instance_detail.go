@@ -207,6 +207,13 @@ func (s *RuntimeServiceImpl) GetProcessInstanceDetail(ctx context.Context, actor
 			variables = v
 		}
 	}
+	// 草稿实例没有任务（发起时不驱动引擎），变量只在实例行上：
+	// 任务侧取不到时回退实例变量，否则暂存的表单数据在详情里不可见
+	if variables == nil && instance.Variables != nil {
+		if v, err := ParseVariablesJSON(instance.Variables); err == nil {
+			variables = v
+		}
+	}
 
 	// 6. 组装响应。ActionPermissions 在第 7 步按"状态 × 设计器"二维合并后填入
 	resp := &dto.InstanceDetailResponse{

@@ -335,3 +335,36 @@ func TestGetProcessInstanceDetail_CandidateExpandFailureDenied(t *testing.T) {
 	engine2.runtimeSvc = rs2
 	require.ErrorIs(t, outsider(rs2), ErrPermissionDenied, "identity 缺失且池含 role/dept 时不得放行详情")
 }
+
+// 草稿实例发起时不驱动引擎、没有任何任务行，详情变量须回退到实例行的暂存数据，
+// 否则暂存的表单数据在详情里不可见（草稿回读丢字段）。
+func TestGetProcessInstanceDetail_DraftFallsBackToInstanceVariables(t *testing.T) {
+	q := secFixDB(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	vars := `{"reason":"draft-reason-xyz","startDate":"2026-09-10"}`
+	require.NoError(t, q.WfInstance.Create(&model.WfInstance{
+		ID: "inst-draft", ProcessID: "proc-1", Name: "draft_test",
+		Status: string(enums.InstanceStatusDraft), StartUserID: "userA",
+		TenantID: "t1", CreatedBy: "userA", CreatedAt: now, Variables: &vars,
+	}))
+
+	taskSvc := &TaskServiceImpl{taskDAO: dao.NewTaskDAOWithQuery(q), hiTaskDAO: dao.NewHiTaskDAOWithQuery(q)}
+	engine := &secFixEngine{taskSvc: taskSvc}
+	rs := &RuntimeServiceImpl{
+		instanceDAO:    dao.NewInstanceDAOWithQuery(q),
+		hiInstanceDAO:  dao.NewHiInstanceDAOWithQuery(q),
+		taskDAO:        dao.NewTaskDAOWithQuery(q),
+		workflowEngine: engine,
+	}
+	engine.runtimeSvc = rs
+
+	starterCtx := SetUserToCtx(ctx, &Actor{UserID: "userA", TenantID: "t1", UserName: "A"})
+	resp, err := rs.GetProcessInstanceDetail(starterCtx, Actor{UserID: "userA", TenantID: "t1"}, "inst-draft")
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	require.NotNil(t, resp.Variables, "草稿详情应回退实例行上的暂存变量")
+	require.Equal(t, "draft-reason-xyz", resp.Variables["reason"])
+	require.Equal(t, "2026-09-10", resp.Variables["startDate"])
+}
