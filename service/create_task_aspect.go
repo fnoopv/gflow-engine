@@ -158,9 +158,13 @@ func (aspect *TaskCreator) Before(ctx types.RuleContext, msg types.RuleMsg, rela
 		// 恢复路径：metadata 里已有 task_id（由 RestoreProcessInstance 注入），
 		// 说明该节点对应的 wf_task 已经存在（上次执行到一半被重启打断）。
 		// 此时必须跳过 CreateTask，否则会产生重复 wf_task，且旧 task 永远停在 Pending。
-		existingTaskId := msg.GetMetadata().GetValue(constants.KeyTaskID)
-		if existingTaskId != "" {
-			return msg
+		// 只有 task_id 属于当前节点才可跳过——上游节点（startTask/userTask）建行后
+		// task_id 会沿消息传下来，残留值不能吞掉本节点的任务行。
+		if existingTaskId := msg.GetMetadata().GetValue(constants.KeyTaskID); existingTaskId != "" {
+			if t, err := aspect.workflowEngine.GetTaskService().GetTask(ctx.GetContext(), SystemActor(), existingTaskId); err == nil &&
+				t != nil && t.TaskDefKey == ctx.GetSelfId() {
+				return msg
+			}
 		}
 		processId := msg.GetMetadata().GetValue(constants.KeyProcessID)
 		// 记录任务

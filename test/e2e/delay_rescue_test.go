@@ -15,30 +15,42 @@ import (
 )
 
 // deployDelayProcess 部署 delay → end 的两节点流程（delayMs 为节点原始配置）。
-func (e *e2eTestEnv) deployDelayProcess(processKey, delayMs string) {
+// prependStart 为 true 时在 delay 前加 startTask 节点，复刻真实 BPM 拓扑。
+func (e *e2eTestEnv) deployDelayProcess(processKey, delayMs string, prependStart ...bool) {
 	e.t.Helper()
+	withStart := len(prependStart) > 0 && prependStart[0]
 	// delayMs 为节点原始配置（支持纯数字或 ${msg.field} 模板）
+	nodes := []map[string]interface{}{
+		{
+			"id":   "delay_node",
+			"type": "delay",
+			"name": "延时",
+			"configuration": map[string]interface{}{
+				"delayMs": delayMs,
+			},
+		},
+		{"id": "end", "type": "end", "name": "End"},
+	}
+	conns := []map[string]interface{}{
+		{"fromId": "delay_node", "toId": "end", "type": "Success"},
+		{"fromId": "delay_node", "toId": "end", "type": "Failure"},
+	}
+	if withStart {
+		nodes = append([]map[string]interface{}{
+			{"id": "start", "type": "startTask", "name": "Start"},
+		}, nodes...)
+		conns = append([]map[string]interface{}{
+			{"fromId": "start", "toId": "delay_node", "type": "Success"},
+		}, conns...)
+	}
 	def := map[string]interface{}{
 		"ruleChain": map[string]interface{}{
 			"id": processKey, "name": processKey, "root": true,
 		},
 		"metadata": map[string]interface{}{
 			"firstNodeIndex": 0,
-			"nodes": []map[string]interface{}{
-				{
-					"id":   "delay_node",
-					"type": "delay",
-					"name": "延时",
-					"configuration": map[string]interface{}{
-						"delayMs": delayMs,
-					},
-				},
-				{"id": "end", "type": "end", "name": "End"},
-			},
-			"connections": []map[string]interface{}{
-				{"fromId": "delay_node", "toId": "end", "type": "Success"},
-				{"fromId": "delay_node", "toId": "end", "type": "Failure"},
-			},
+			"nodes":          nodes,
+			"connections":    conns,
 		},
 	}
 	raw, err := json.Marshal(def)
@@ -115,6 +127,23 @@ func TestE2E_DelayTask_TemplateDelayMsEvaluated(t *testing.T) {
 	require.NotNil(t, task.DueDate, "template delayMs must still produce due_date")
 	assert.WithinDuration(t, task.CreatedAt.Add(7*time.Second), *task.DueDate, 10*time.Second,
 		"due_date should be created_at + 7s (msg.waitMs)")
+}
+
+// 真实 BPM 拓扑（startTask → delay → end）：startTask 建行后 task_id 会沿消息
+// 传到 delay，delay 的任务行不能被该残留 id 吞掉。
+func TestE2E_DelayTask_AfterStartTaskRowCreated(t *testing.T) {
+	env := newE2EEnv(t)
+	env.deployDelayProcess("delay_after_start", "3600000", true)
+
+	instID, err := env.startWithBizKey("delay_after_start", "starter", "", nil)
+	require.NoError(t, err)
+
+	var task *model.WfTask
+	require.Eventually(t, func() bool {
+		task = env.waitingDelayTask(instID)
+		return task != nil
+	}, 3*time.Second, 50*time.Millisecond, "delay task row must exist after startTask")
+	require.NotNil(t, task.DueDate, "delay task after startTask must carry due_date")
 }
 
 // ---------------------------------------------------------------------------
