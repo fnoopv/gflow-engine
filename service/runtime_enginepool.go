@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/rulego/gflow-engine/dao"
 	"github.com/rulego/gflow-engine/model"
@@ -74,6 +75,33 @@ func invalidateExecutionCacheLocal(processID string) {
 		}
 		return true
 	})
+}
+
+// RecentlyUpdatedProcessIDs 返回 updated_at 晚于 since 的流程定义 ID，供宿主做
+// enginePool/forkGraph 失效的兜底巡检：失效广播是 pub/sub，副本断连窗口内错过
+// 的消息不补发，宿主周期性按时间窗扫近期变更逐条驱逐（池条目懒加载，驱逐即对账）。
+// 经注册表取服务实例的 DAO 查询；生产环境各实例共享同一数据库，任取一个即可，
+// 查询失败换下一个注册实例重试（容忍实例间瞬时差异）。
+func RecentlyUpdatedProcessIDs(ctx context.Context, since time.Time) ([]string, error) {
+	var ids []string
+	var lastErr error
+	runtimeServiceRegistry.Range(func(k, _ any) bool {
+		s, ok := k.(*RuntimeServiceImpl)
+		if !ok || s == nil {
+			return true
+		}
+		db := s.processDAO.Query.WfProcess.UnderlyingDB().WithContext(ctx)
+		if err := db.Model(&model.WfProcess{}).Where("updated_at > ?", since).Pluck("id", &ids).Error; err != nil {
+			lastErr = err
+			return true
+		}
+		lastErr = nil
+		return false
+	})
+	if lastErr != nil {
+		return nil, fmt.Errorf("recently updated process ids: %w", lastErr)
+	}
+	return ids, nil
 }
 
 // GetExecution 根据ID获取执行实例（租户感知：先查 processID→tenant 缓存定位租户池）。

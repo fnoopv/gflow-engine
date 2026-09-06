@@ -10,13 +10,16 @@ import (
 	"fmt"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 
 	"github.com/rulego/gflow-engine/dao"
+	"github.com/rulego/gflow-engine/model"
 	"github.com/rulego/gflow-engine/query"
 	"github.com/rulego/gflow-engine/types/enums"
 	"github.com/rulego/rulego"
@@ -367,4 +370,33 @@ func TestEnginePool_InvalidateExecutionCache(t *testing.T) {
 		t.Fatalf("ApplyRemoteExecutionInvalidate 不应再广播，却收到 %q", got)
 	default:
 	}
+}
+
+// RecentlyUpdatedProcessIDs 只返回 updated_at 晚于 since 的定义：
+// 失效兜底巡检按时间窗扫近期变更，窗口外的不得进入结果。
+func TestRecentlyUpdatedProcessIDs(t *testing.T) {
+	q := newDelayRescueTestDB(t)
+	now := time.Now()
+	stale := now.Add(-time.Hour)
+
+	fresh := &model.WfProcess{ID: "proc-fresh", ProcessKey: "k1", Name: "n", Version: 1,
+		DefinitionJSON: "{}", Status: "active", TenantID: "t1", CreatedAt: now, UpdatedAt: &now}
+	old := &model.WfProcess{ID: "proc-old", ProcessKey: "k2", Name: "n", Version: 1,
+		DefinitionJSON: "{}", Status: "active", TenantID: "t1", CreatedAt: stale, UpdatedAt: &stale}
+	ctx := context.Background()
+	d := dao.NewProcessDAOWithQuery(q)
+	require.NoError(t, d.Create(ctx, fresh))
+	require.NoError(t, d.Create(ctx, old))
+
+	rs := &RuntimeServiceImpl{processDAO: d}
+	runtimeServiceRegistry.Store(rs, struct{}{})
+	t.Cleanup(func() { runtimeServiceRegistry.Delete(rs) })
+
+	ids, err := RecentlyUpdatedProcessIDs(ctx, now.Add(-time.Minute))
+	require.NoError(t, err)
+	require.Equal(t, []string{"proc-fresh"}, ids)
+
+	ids, err = RecentlyUpdatedProcessIDs(ctx, now.Add(-2*time.Hour))
+	require.NoError(t, err)
+	require.Len(t, ids, 2)
 }
