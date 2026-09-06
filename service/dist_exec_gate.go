@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -34,6 +36,11 @@ func distExecGateKey(instanceID string) string {
 	return "bpm:exec-gate:" + instanceID
 }
 
+// ErrExecGateBusy 表示实例的跨副本执行门闩被其他持有者占用。救援类驱动
+// （卡死重驱/超期 delay 救援）撞上该错误说明实例正被某个存活副本驱动，
+// 调用方应跳过本轮而不是重试。
+var ErrExecGateBusy = errors.New("process instance is being driven by another holder")
+
 // acquireDistExecGate 获取实例级跨副本驱动门闩。返回 nil 表示未持锁（放行执行，
 // 调用方无须释放）；返回非 nil 时驱动完成后须调用释放函数（幂等）。同 goroutine
 // 重入由上层 execGate 的 reentrant 标记跳过，此处不做重入计数。
@@ -62,6 +69,55 @@ func (s *RuntimeServiceImpl) acquireDistExecGate(ctx context.Context, instanceID
 			logrus.WithError(err).WithField("instanceId", instanceID).Debug("dist exec gate: unlock failed")
 		}
 	}
+}
+
+// tryAcquireDistExecGate 严格模式获取门闩：单次 TryLock，不等待不重试。
+// 拿不到（被其他副本的驱动持有）返回 ErrExecGateBusy，调用方据此跳过本轮；
+// 后端故障同样报错，等下一拍巡检再试，不无锁驱动。拿到后与
+// acquireDistExecGate 相同：看门狗续期、返回释放函数。
+func (s *RuntimeServiceImpl) tryAcquireDistExecGate(ctx context.Context, instanceID string) (func(), error) {
+	if instanceID == "" {
+		return nil, nil
+	}
+	if s.workflowEngine == nil {
+		return nil, nil
+	}
+	locker := s.workflowEngine.GetLocker()
+	if locker == nil {
+		return nil, nil
+	}
+	key := distExecGateKey(instanceID)
+	value, ok, err := locker.TryLock(ctx, key, distExecGateTTL)
+	if err != nil {
+		return nil, fmt.Errorf("dist exec gate: try acquire failed: %w", err)
+	}
+	if !ok {
+		return nil, ErrExecGateBusy
+	}
+	stopWatchdog := s.startGateWatchdog(locker, key, value, instanceID)
+	return func() {
+		stopWatchdog()
+		if err := locker.Unlock(context.Background(), key, value); err != nil {
+			logrus.WithError(err).WithField("instanceId", instanceID).Debug("dist exec gate: unlock failed")
+		}
+	}, nil
+}
+
+// strictDistGateCtxKey 救援类驱动的严格门闩标记：ExecuteNext 取门闩时改用
+// tryAcquireDistExecGate，拿不到即返回 ErrExecGateBusy，不再放行无锁驱动。
+type strictDistGateCtxKey struct{}
+
+// WithStrictDistGate 标记本次调用走严格门闩（卡死重驱等救援路径用）。
+func WithStrictDistGate(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, strictDistGateCtxKey{}, true)
+}
+
+func strictDistGate(ctx context.Context) bool {
+	v, _ := ctx.Value(strictDistGateCtxKey{}).(bool)
+	return v
 }
 
 // startGateWatchdog 持锁期间周期性续期；锁实现不支持续期（如进程内锁）时无操作。

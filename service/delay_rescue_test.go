@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rulego/gflow-engine/utils/lock"
+
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -205,3 +207,55 @@ func TestRescueExpiredDelayTask_Validation(t *testing.T) {
 
 // timePtr 返回时间指针（测试构造 DueDate 用）。
 func timePtr(t time.Time) *time.Time { return &t }
+
+// 门闩被对端副本持有时救援让位：返回 ErrExecGateBusy 而不是无锁重入
+// （严格门闩，防同步节点执行中的实例被重驱）。
+func TestRescueExpiredDelayTask_GateBusy(t *testing.T) {
+	q := newDelayRescueTestDB(t)
+	rs := newDelayRescueRS(q)
+	shared := lock.NewLocalLock()
+	defer shared.Close()
+	rs.workflowEngine = &gateTestEngine{l: shared}
+	now := time.Now()
+	ctx := context.Background()
+	sysActor := Actor{UserID: "sys", TenantID: "t1"}
+
+	require.NoError(t, dao.NewInstanceDAOWithQuery(q).Create(ctx, &model.WfInstance{
+		ID: "inst-busy", ProcessID: "proc-d", Name: "d", Status: string(enums.InstanceStatusActive),
+		TenantID: "t1", CreatedBy: "sys", StartUserID: "s", CreatedAt: now,
+	}))
+	seedDelayTask(t, q, "t-busy", "inst-busy", string(enums.TaskStatusPending), timePtr(now.Add(-time.Hour)), now.Add(-2*time.Hour))
+
+	// 对端副本持锁（模拟该实例的同步驱动仍在进行，如 LLM 调用）
+	_, err := shared.Lock(ctx, distExecGateKey("inst-busy"), time.Minute)
+	require.NoError(t, err)
+
+	err = rs.RescueExpiredDelayTask(ctx, sysActor, "t-busy")
+	require.ErrorIs(t, err, ErrExecGateBusy, "门闩被持有时应让位返回 ErrExecGateBusy")
+}
+
+// 卡死实例重驱同样走严格门闩：实例正被对端驱动时拒绝重驱。
+func TestReDriveProcessInstance_GateBusy(t *testing.T) {
+	q := newDelayRescueTestDB(t)
+	rs := newDelayRescueRS(q)
+	shared := lock.NewLocalLock()
+	defer shared.Close()
+	rs.workflowEngine = &gateTestEngine{l: shared}
+	now := time.Now()
+	ctx := context.Background()
+	sysActor := Actor{UserID: "sys", TenantID: "t1"}
+
+	activity := "node_ai"
+	require.NoError(t, dao.NewInstanceDAOWithQuery(q).Create(ctx, &model.WfInstance{
+		ID: "inst-stuck", ProcessID: "proc-d", Name: "d", Status: string(enums.InstanceStatusActive),
+		CurrentActivity: &activity,
+		TenantID:        "t1", CreatedBy: "sys", StartUserID: "s", CreatedAt: now,
+	}))
+
+	// 对端副本持锁：实例正在被驱动（无任务行的同步执行窗口）
+	_, err := shared.Lock(ctx, distExecGateKey("inst-stuck"), time.Minute)
+	require.NoError(t, err)
+
+	err = rs.ReDriveProcessInstance(ctx, sysActor, "inst-stuck")
+	require.ErrorIs(t, err, ErrExecGateBusy, "门闩被持有时重驱应让位返回 ErrExecGateBusy")
+}

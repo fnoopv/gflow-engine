@@ -106,6 +106,13 @@ func (f *fakeVarRuntime) reset() {
 	f.terminated = nil
 }
 
+// resetTerminated 只清终止记录保留变量（复用裁决测试两轮间用）。
+func (f *fakeVarRuntime) resetTerminated() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.terminated = nil
+}
+
 func (f *fakeVarRuntime) varValue(name string) (interface{}, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -878,7 +885,7 @@ func TestAIAgentNode_AssembleMultimodalAttachments(t *testing.T) {
 // 结果复用（实例变量缓存）
 // ---------------------------------------------------------------------------
 
-// 同步调用成功后，输出写入实例变量 ai_out_{nodeId}。
+// 同步调用成功后，输出连同输入指纹写入实例变量 ai_out_{nodeId}。
 func TestAIAgentNode_PersistOutputOnSuccess(t *testing.T) {
 	exec := useFakeExec(t)
 	exec.collectFn = func(_ string, _ types.RuleMsg, _ time.Duration) (types.RuleMsg, error) {
@@ -889,41 +896,108 @@ func TestAIAgentNode_PersistOutputOnSuccess(t *testing.T) {
 
 	v, ok := testRuntimeSvc.varValue("ai_out_ai_node")
 	require.True(t, ok, "sync success must persist output to instance variable")
-	require.Equal(t, `{"summary":"ok"}`, v)
+	var cacheEntry aiOutputCache
+	require.NoError(t, json.Unmarshal([]byte(fmt.Sprint(v)), &cacheEntry))
+	require.Equal(t, `{"summary":"ok"}`, cacheEntry.Out)
+	require.NotEmpty(t, cacheEntry.In, "缓存值必须携带输入指纹")
 }
 
-// 实例变量已有本节点输出时，重入跳过 LLM 调用，输出按原规则合并进消息续跑。
+// 同输入重入（重驱/恢复场景）：首轮落缓存，第二轮跳过 LLM 直接复用输出续跑。
 func TestAIAgentNode_ReuseCachedOutputSkipsLLM(t *testing.T) {
 	exec := useFakeExec(t)
-	require.NoError(t, testRuntimeSvc.SetProcessInstanceVariable(
-		context.Background(), service.Actor{}, "inst-001", "ai_out_ai_node", `{"summary":"cached"}`))
-
+	exec.collectFn = func(_ string, _ types.RuleMsg, _ time.Duration) (types.RuleMsg, error) {
+		return newAgentOutput(`{"summary":"fresh"}`), nil
+	}
 	engine := buildAIEngine(t, "ai_reuse", `{"agentId":"a","timeoutSec":5}`)
-	endMsg, rel, err := runChain(t, engine, newAIInstanceMsg())
 
+	// 首轮：真实调用并落缓存（输出+输入指纹）
+	_, rel, err := runChain(t, engine, newAIInstanceMsg())
 	require.NoError(t, err)
 	require.Equal(t, types.Success, rel)
-	require.Equal(t, int32(0), exec.collectCalls.Load(), "cached output must skip the LLM call")
+	require.Equal(t, int32(1), exec.collectCalls.Load())
+
+	// 第二轮（同输入，模拟重驱/恢复）：跳过 LLM，输出按原规则合并续跑
+	endMsg, rel, err := runChain(t, engine, newAIInstanceMsg())
+	require.NoError(t, err)
+	require.Equal(t, types.Success, rel)
+	require.Equal(t, int32(1), exec.collectCalls.Load(), "same-input re-entry must skip the LLM call")
 
 	// 输出注回消息：完整输出挂保留键 _ai，平铺模式下顶层字段并入 msg.Data
 	data := endMsg.GetData()
 	require.Contains(t, data, `"summary"`)
 	ai, ok := dataVarsFromMsg(endMsg)[AIAgentReservedKey]
 	require.True(t, ok, "reserved key must carry the cached output")
-	require.Contains(t, fmt.Sprint(ai), "cached")
+	require.Contains(t, fmt.Sprint(ai), "fresh")
 }
 
-// 复用路径同样重放裁决：缓存输出含拒绝标记 → 拒绝策略生效（默认 terminate）。
-func TestAIAgentNode_ReuseCachedOutputReplaysDecision(t *testing.T) {
+// 输入已变（驳回回跳后表单修改）：缓存指纹不匹配视为失效，重新调用 LLM，
+// 不得复用首次的旧审查结论。
+func TestAIAgentNode_ChangedInputInvalidatesCache(t *testing.T) {
 	exec := useFakeExec(t)
-	require.NoError(t, testRuntimeSvc.SetProcessInstanceVariable(
-		context.Background(), service.Actor{}, "inst-001", "ai_out_ai_node", "分析：金额超限\nAI_DECISION: REJECT"))
+	exec.collectFn = func(_ string, _ types.RuleMsg, _ time.Duration) (types.RuleMsg, error) {
+		return newAgentOutput(`{"summary":"r"}`), nil
+	}
+	engine := buildAIEngine(t, "ai_reuse_changed",
+		`{"agentId":"a","timeoutSec":5,"inputAssembly":{"contextSources":{"formData":true}}}`)
 
-	engine := buildAIEngine(t, "ai_reuse_reject", `{"agentId":"a","timeoutSec":5,"decision":{"rejectStrategy":"terminate"}}`)
+	formMsg := func(amount string) types.RuleMsg {
+		meta := types.NewMetadata()
+		meta.PutValue(constants.KeyInstanceID, "inst-001")
+		return types.NewMsg(0, "t", types.JSON, meta, fmt.Sprintf(`{"amount":%s}`, amount))
+	}
+
+	// 首轮 amount=100：调用并落缓存
+	_, _, err := runChain(t, engine, formMsg("100"))
+	require.NoError(t, err)
+	require.Equal(t, int32(1), exec.collectCalls.Load())
+
+	// 同输入重入：命中缓存不调 LLM
+	_, _, err = runChain(t, engine, formMsg("100"))
+	require.NoError(t, err)
+	require.Equal(t, int32(1), exec.collectCalls.Load(), "same input must reuse cache")
+
+	// 输入变化（回跳后表单已改）：指纹不匹配，重新调用
+	_, _, err = runChain(t, engine, formMsg("200"))
+	require.NoError(t, err)
+	require.Equal(t, int32(2), exec.collectCalls.Load(), "changed input must invalidate cache and re-call LLM")
+}
+
+// 旧版纯文本缓存（无指纹信封）：不识别视为失效重新调用（升级期兼容路径）。
+func TestAIAgentNode_LegacyPlainCacheNotReused(t *testing.T) {
+	exec := useFakeExec(t)
+	exec.collectFn = func(_ string, _ types.RuleMsg, _ time.Duration) (types.RuleMsg, error) {
+		return newAgentOutput(`{"summary":"r"}`), nil
+	}
+	require.NoError(t, testRuntimeSvc.SetProcessInstanceVariable(
+		context.Background(), service.Actor{}, "inst-001", "ai_out_ai_node", `{"summary":"legacy-plain"}`))
+
+	engine := buildAIEngine(t, "ai_reuse_legacy", `{"agentId":"a","timeoutSec":5}`)
 	_, _, err := runChain(t, engine, newAIInstanceMsg())
 
 	require.NoError(t, err)
-	require.Equal(t, int32(0), exec.collectCalls.Load(), "reuse must skip the LLM call")
+	require.Equal(t, int32(1), exec.collectCalls.Load(), "legacy plain cache without fingerprint must not be reused")
+}
+
+// 复用路径同样重放裁决：首轮拒绝结论落缓存，重入跳过调用并再次走终止策略。
+func TestAIAgentNode_ReuseCachedOutputReplaysDecision(t *testing.T) {
+	exec := useFakeExec(t)
+	exec.collectFn = func(_ string, _ types.RuleMsg, _ time.Duration) (types.RuleMsg, error) {
+		return newAgentOutput("分析：金额超限\nAI_DECISION: REJECT"), nil
+	}
+	engine := buildAIEngine(t, "ai_reuse_reject", `{"agentId":"a","timeoutSec":5,"decision":{"rejectStrategy":"terminate"}}`)
+
+	// 首轮：拒绝结论落缓存并终止实例
+	_, _, err := runChain(t, engine, newAIInstanceMsg())
+	require.NoError(t, err)
+	require.Equal(t, int32(1), exec.collectCalls.Load())
+	require.Equal(t, []string{"inst-001"}, testRuntimeSvc.terminatedSnapshot(),
+		"first-run REJECT marker must route to the reject strategy")
+
+	// 重入（同输入）：复用缓存的拒绝结论，不再调 LLM 仍走终止
+	testRuntimeSvc.resetTerminated()
+	_, _, err = runChain(t, engine, newAIInstanceMsg())
+	require.NoError(t, err)
+	require.Equal(t, int32(1), exec.collectCalls.Load(), "reuse must skip the LLM call")
 	require.Equal(t, []string{"inst-001"}, testRuntimeSvc.terminatedSnapshot(),
 		"cached REJECT marker must route to the reject strategy")
 }
@@ -931,15 +1005,13 @@ func TestAIAgentNode_ReuseCachedOutputReplaysDecision(t *testing.T) {
 // 异步模式不落缓存也不复用（fire-and-forget 无同步输出可复用）。
 func TestAIAgentNode_AsyncNoPersistNoReuse(t *testing.T) {
 	exec := useFakeExec(t)
-	require.NoError(t, testRuntimeSvc.SetProcessInstanceVariable(
-		context.Background(), service.Actor{}, "inst-001", "ai_out_ai_node", `{"summary":"cached"}`))
 
 	engine := buildAIEngine(t, "ai_async_reuse", `{"agentId":"a","async":true}`)
 	runChain(t, engine, newAIInstanceMsg())
 
-	require.Equal(t, int32(1), exec.executeCalls.Load(), "async mode must not reuse the cache")
-	_, ok := testRuntimeSvc.varValue("ai_out_async_node")
-	require.False(t, ok)
+	require.Equal(t, int32(1), exec.executeCalls.Load(), "async mode must call through")
+	_, ok := testRuntimeSvc.varValue("ai_out_ai_node")
+	require.False(t, ok, "async mode must not persist output cache")
 }
 
 // 失败路径不落缓存（只有成功输出才可复用）。

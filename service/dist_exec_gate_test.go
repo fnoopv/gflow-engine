@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -168,4 +169,59 @@ func TestDistExecGate_WatchdogStopsOnOwnershipLost(t *testing.T) {
 	time.Sleep(70 * time.Millisecond)
 	time.Sleep(60 * time.Millisecond)
 	assert.Equal(t, 1, ext.count(), "持有权丢失后应只在首个周期续期一次即退出")
+}
+
+// 严格模式（救援路径）：门闩被他人持有时立即返回 ErrExecGateBusy，不放行、不等待。
+func TestTryAcquireDistExecGate_BusyReturnsError(t *testing.T) {
+	shared := lock.NewLocalLock()
+	defer shared.Close()
+
+	// 对端副本持锁（模拟同步节点驱动中，如 LLM 调用进行时）
+	holderToken, err := shared.Lock(context.Background(), distExecGateKey("inst-3"), time.Minute)
+	require.NoError(t, err)
+
+	replica := newGateTestRuntime(shared)
+	start := time.Now()
+	unlock, err := replica.tryAcquireDistExecGate(context.Background(), "inst-3")
+	require.ErrorIs(t, err, ErrExecGateBusy, "严格模式拿不到门闩应返回 ErrExecGateBusy 而不是放行")
+	assert.Nil(t, unlock)
+	assert.Less(t, time.Since(start), 500*time.Millisecond, "严格模式单次 TryLock 不应等待")
+
+	// 空闲时正常获得并释放
+	unlock2, err := replica.tryAcquireDistExecGate(context.Background(), "inst-4")
+	require.NoError(t, err)
+	require.NotNil(t, unlock2)
+	unlock2()
+	// 原持有者释放后，再取同一实例应成功（busy 是暂态让位，非永久拒绝）
+	require.NoError(t, shared.Unlock(context.Background(), distExecGateKey("inst-3"), holderToken))
+	value, ok, err := shared.TryLock(context.Background(), distExecGateKey("inst-3"), time.Minute)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.NotEmpty(t, value)
+}
+
+// 严格模式的后端故障同样报错：调用方跳过本轮等下一拍。
+func TestTryAcquireDistExecGate_BackendErrorFails(t *testing.T) {
+	failing := &failingLocker{}
+	replica := newGateTestRuntime(failing)
+	unlock, err := replica.tryAcquireDistExecGate(context.Background(), "inst-5")
+	require.Error(t, err, "锁后端故障应报错而非放行")
+	assert.NotErrorIs(t, err, ErrExecGateBusy, "后端故障与 busy 语义分离，便于排查")
+	assert.Nil(t, unlock)
+}
+
+// failingLocker 模拟 redis 不可达：所有操作报错。
+type failingLocker struct{}
+
+func (f *failingLocker) Lock(ctx context.Context, key string, expiration time.Duration) (string, error) {
+	return "", fmt.Errorf("backend down")
+}
+func (f *failingLocker) Unlock(ctx context.Context, key, token string) error {
+	return fmt.Errorf("backend down")
+}
+func (f *failingLocker) TryLock(ctx context.Context, key string, expiration time.Duration) (string, bool, error) {
+	return "", false, fmt.Errorf("backend down")
+}
+func (f *failingLocker) LockWithRetry(ctx context.Context, key string, expiration time.Duration, retryInterval time.Duration, maxRetries int) (string, error) {
+	return "", fmt.Errorf("backend down")
 }

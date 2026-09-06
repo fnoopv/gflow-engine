@@ -1150,7 +1150,17 @@ func (s *RuntimeServiceImpl) ExecuteNext(ctx context.Context, processInstanceID,
 	defer release()
 	if !reentrant {
 		// 跨副本互斥：execGate 只管本进程，副本间由 Locker 串行化（单机 LocalLock 无感）
-		if unlock := s.acquireDistExecGate(ctx, processInstanceID); unlock != nil {
+		if strictDistGate(ctx) {
+			// 救援类驱动（卡死重驱）严格取门闩：拿不到说明实例正被存活副本
+			// 驱动，让位返回错误，不与在途驱动并发
+			unlock, err := s.tryAcquireDistExecGate(ctx, processInstanceID)
+			if err != nil {
+				return fmt.Errorf("ExecuteNext %s: %w", processInstanceID, err)
+			}
+			if unlock != nil {
+				defer unlock()
+			}
+		} else if unlock := s.acquireDistExecGate(ctx, processInstanceID); unlock != nil {
 			defer unlock()
 		}
 		// 等门闩期间实例可能已被先到的驱动完成（实例行已删除）：幂等返回 nil，
@@ -1663,8 +1673,13 @@ func (s *RuntimeServiceImpl) RescueExpiredDelayTask(ctx context.Context, actor A
 		return fmt.Errorf("process instance %s is %s, only active instances can be rescued", instanceID, instance.Status)
 	}
 
-	// 判定与重驱须与对端副本的驱动互斥（同 RestoreProcessInstance）
-	if unlock := s.acquireDistExecGate(ctx, instanceID); unlock != nil {
+	// 判定与重驱须与对端副本的驱动互斥（同 RestoreProcessInstance），救援路径
+	// 走严格模式：拿不到门闩说明计时器所属副本可能仍在驱动，让位等下一拍
+	unlock, err := s.tryAcquireDistExecGate(ctx, instanceID)
+	if err != nil {
+		return fmt.Errorf("rescue delay task %s: %w", taskID, err)
+	}
+	if unlock != nil {
 		defer unlock()
 	}
 	// 等门闩期间任务可能已被在途计时器正常完成：重读确认仍是计时中状态
@@ -1764,6 +1779,9 @@ func (s *RuntimeServiceImpl) ReDriveProcessInstance(ctx context.Context, actor A
 		"instance_id": processInstanceID,
 		"node":        node,
 	}).Warn("manual re-drive of possibly stuck instance")
+	// 严格门闩：拿不到说明实例正被存活副本驱动（如同步节点执行中），
+	// 让位返回 ErrExecGateBusy 由调用方择机重试
+	ctx = WithStrictDistGate(ctx)
 	return s.ExecuteNext(ctx, processInstanceID, node, nil)
 }
 
