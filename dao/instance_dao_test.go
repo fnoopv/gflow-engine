@@ -451,12 +451,12 @@ func TestInstanceDAO_ListByTaskConditions_ExcludesDeleted(t *testing.T) {
 	mkHi := func(id, status string) (*model.WfHiInstance, *model.WfHiTask) {
 		defKey := "n1"
 		return &model.WfHiInstance{
-				ID: id, ProcessID: "p1", Name: id, Status: status,
-				TenantID: "t1", StartUserID: "u1", CreatedAt: now,
-			}, &model.WfHiTask{
-				ID: "hitask-" + id, ProcessInstanceID: &id, TaskDefKey: &defKey, Name: "审批",
-				TaskType: "user_task", Status: "completed", Assignee: &assignee, TenantID: "t1", CreatedAt: now,
-			}
+			ID: id, ProcessID: "p1", Name: id, Status: status,
+			TenantID: "t1", StartUserID: "u1", CreatedAt: now,
+		}, &model.WfHiTask{
+			ID: "hitask-" + id, ProcessInstanceID: &id, TaskDefKey: &defKey, Name: "审批",
+			TaskType: "user_task", Status: "completed", Assignee: &assignee, TenantID: "t1", CreatedAt: now,
+		}
 	}
 	for _, tc := range []struct{ id, status string }{
 		{"hi-done", "completed"},
@@ -650,5 +650,86 @@ func TestInstanceDAO_CountTaskInstancesByBuckets(t *testing.T) {
 		if counts[k] != v {
 			t.Errorf("counts[%s] = %d, want %d", k, counts[k], v)
 		}
+	}
+}
+
+// NULL end_reason 的 terminated 实例必须计入「已终止」桶与列表：
+// end_reason NOT LIKE 'x%' 在 SQL 三值逻辑下对 NULL 返回未知，若不 COALESCE，
+// NULL 终止实例会被「已终止」桶/列表漏掉（chips 总数与列表对不上）。
+func TestInstanceDAO_NullEndReasonCountedInTerminated(t *testing.T) {
+	q := newTestQuery(t, ddlWfInstance, ddlWfHiInstance, ddlWfTask, ddlWfHiTask)
+	d := NewInstanceDAOWithQuery(q)
+	ctx := context.Background()
+	now := time.Now()
+
+	reasonRejected := "审批拒绝：不同意"
+	reasonWithdrawn := "申请人撤回"
+	reasonManual := "系统终止"
+	assignee := "u1"
+	seed := []*model.WfInstance{
+		{ID: "i-null-term", ProcessID: "p1", Name: "null", Status: "terminated", EndReason: nil, TenantID: "t1", StartUserID: "u1", CreatedAt: now},
+		{ID: "i-rejected", ProcessID: "p1", Name: "rejected", Status: "terminated", EndReason: &reasonRejected, TenantID: "t1", StartUserID: "u1", CreatedAt: now},
+		{ID: "i-withdrawn", ProcessID: "p1", Name: "withdrawn", Status: "terminated", EndReason: &reasonWithdrawn, TenantID: "t1", StartUserID: "u1", CreatedAt: now},
+		{ID: "i-manual", ProcessID: "p1", Name: "manual", Status: "terminated", EndReason: &reasonManual, TenantID: "t1", StartUserID: "u1", CreatedAt: now},
+	}
+	for _, in := range seed {
+		if err := d.Create(ctx, in); err != nil {
+			t.Fatalf("seed instance %s: %v", in.ID, err)
+		}
+		tk := &model.WfTask{ID: "t-" + in.ID, ProcessInstanceID: &in.ID, TaskDefKey: "n1", Name: "审批", TaskType: "user_task", Status: "completed", Assignee: &assignee, TenantID: "t1", CreatedAt: now}
+		if err := q.WfTask.Create(tk); err != nil {
+			t.Fatalf("seed task %s: %v", tk.ID, err)
+		}
+	}
+
+	buckets := []InstanceStatusBucket{
+		{Name: "rejected", Statuses: []string{"terminated"}, EndReasonPrefix: "审批拒绝"},
+		{Name: "terminated", Statuses: []string{"terminated"}, EndReasonNotPrefixes: []string{"审批拒绝", "申请人撤回"}},
+	}
+
+	// 1) 实例维度桶计数（bucketWhere 的 NOT LIKE）
+	counts, err := d.CountInstancesUnionByBuckets(ctx, "t1", "", "u1", "", nil, nil, buckets)
+	if err != nil {
+		t.Fatalf("count union by buckets: %v", err)
+	}
+	if counts["terminated"] != 2 || counts["rejected"] != 1 {
+		t.Errorf("union bucket counts = %v, want terminated=2 rejected=1（NULL end_reason 不得漏计）", counts)
+	}
+
+	// 2) 联合查询列表（buildInstanceUnionQuery 的 NOT LIKE）
+	list, total, err := d.GetInstancesUnionPagination(ctx, "t1", "", "u1", []string{"terminated"}, "", nil, nil, 10, 0, "", "", "", "审批拒绝", "申请人撤回")
+	if err != nil {
+		t.Fatalf("union by not-prefix: %v", err)
+	}
+	if total != 2 {
+		t.Errorf("union terminated total = %d, want 2", total)
+	}
+	ids := map[string]bool{}
+	for _, in := range list {
+		ids[in.ID] = true
+	}
+	if !ids["i-null-term"] || !ids["i-manual"] || ids["i-rejected"] || ids["i-withdrawn"] {
+		t.Errorf("union terminated list = %v, want i-null-term+i-manual only", ids)
+	}
+
+	// 3) 任务维度列表（buildTaskInstanceQuery 的 NOT LIKE）
+	done, total2, err := d.ListByTaskConditions(ctx, &dto.TaskQuery{
+		Assignee: "u1", TenantID: "t1",
+		InstanceStatuses:     []string{"terminated"},
+		EndReasonNotPrefixes: []string{"审批拒绝", "申请人撤回"},
+		PageRequest:          dto.PageRequest{Status: []string{"completed"}},
+	})
+	if err != nil {
+		t.Fatalf("ListByTaskConditions by not-prefix: %v", err)
+	}
+	if total2 != 2 {
+		t.Errorf("ListByTaskConditions terminated total = %d, want 2", total2)
+	}
+	doneIDs := map[string]bool{}
+	for _, in := range done {
+		doneIDs[in.ID] = true
+	}
+	if !doneIDs["i-null-term"] || !doneIDs["i-manual"] || doneIDs["i-rejected"] || doneIDs["i-withdrawn"] {
+		t.Errorf("task-dim terminated list = %v, want i-null-term+i-manual only", doneIDs)
 	}
 }
