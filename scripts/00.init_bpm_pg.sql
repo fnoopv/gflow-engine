@@ -144,8 +144,8 @@ CREATE TABLE IF NOT EXISTS wf_hi_instance
     priority          INTEGER      NOT NULL DEFAULT 50,
     parent_id         VARCHAR(64),
     tenant_id         VARCHAR(64)  NOT NULL DEFAULT '',
-    created_by        VARCHAR(64)  NOT NULL,
-    created_at        TIMESTAMPTZ  NOT NULL,
+    created_by        VARCHAR(64)  NOT NULL DEFAULT '',
+    created_at        TIMESTAMPTZ  NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_by        VARCHAR(64),
     updated_at        TIMESTAMPTZ,
 
@@ -319,7 +319,7 @@ CREATE TABLE IF NOT EXISTS wf_hi_task
     /* 审计 */
     tenant_id           VARCHAR(64) NOT NULL DEFAULT '',
     created_by          VARCHAR(64) NOT NULL DEFAULT '',
-    created_at          TIMESTAMPTZ NOT NULL,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_by          VARCHAR(64),
     updated_at          TIMESTAMPTZ
 );
