@@ -2,6 +2,7 @@ package dao
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -451,12 +452,13 @@ func TestInstanceDAO_ListByTaskConditions_ExcludesDeleted(t *testing.T) {
 	mkHi := func(id, status string) (*model.WfHiInstance, *model.WfHiTask) {
 		defKey := "n1"
 		return &model.WfHiInstance{
-			ID: id, ProcessID: "p1", Name: id, Status: status,
-			TenantID: "t1", StartUserID: "u1", CreatedAt: now,
-		}, &model.WfHiTask{
-			ID: "hitask-" + id, ProcessInstanceID: &id, TaskDefKey: &defKey, Name: "审批",
-			TaskType: "user_task", Status: "completed", Assignee: &assignee, TenantID: "t1", CreatedAt: now,
-		}
+				ID: id, ProcessID: "p1", Name: id, Status: status,
+				TenantID: "t1", StartUserID: "u1", CreatedAt: now,
+			},
+			&model.WfHiTask{
+				ID: "hitask-" + id, ProcessInstanceID: &id, TaskDefKey: &defKey, Name: "审批",
+				TaskType: "user_task", Status: "completed", Assignee: &assignee, TenantID: "t1", CreatedAt: now,
+			}
 	}
 	for _, tc := range []struct{ id, status string }{
 		{"hi-done", "completed"},
@@ -654,8 +656,10 @@ func TestInstanceDAO_CountTaskInstancesByBuckets(t *testing.T) {
 }
 
 // NULL end_reason 的 terminated 实例必须计入「已终止」桶与列表：
-// end_reason NOT LIKE 'x%' 在 SQL 三值逻辑下对 NULL 返回未知，若不 COALESCE，
+// end_reason NOT LIKE 'x%' 在 SQL 三值逻辑下对 NULL 返回未知，若不特殊处理，
 // NULL 终止实例会被「已终止」桶/列表漏掉（chips 总数与列表对不上）。
+// 判空采用 (end_reason IS NULL OR ...)：IS NULL 是 ANSI 标准语义，不依赖
+// 「空串≠NULL」，在 Oracle/达梦等把空串当 NULL 的方言下行为仍一致。
 func TestInstanceDAO_NullEndReasonCountedInTerminated(t *testing.T) {
 	q := newTestQuery(t, ddlWfInstance, ddlWfHiInstance, ddlWfTask, ddlWfHiTask)
 	d := NewInstanceDAOWithQuery(q)
@@ -731,5 +735,28 @@ func TestInstanceDAO_NullEndReasonCountedInTerminated(t *testing.T) {
 	}
 	if !doneIDs["i-null-term"] || !doneIDs["i-manual"] || doneIDs["i-rejected"] || doneIDs["i-withdrawn"] {
 		t.Errorf("task-dim terminated list = %v, want i-null-term+i-manual only", doneIDs)
+	}
+}
+
+// 可移植性护栏：end_reason 的 NOT LIKE 判空必须用 ANSI 标准的 IS NULL OR，
+// 不得退回 COALESCE 折叠空串的写法。Oracle/达梦等把空串当 NULL 的方言下，
+// 那种写法会退化（NULL 终止实例再次被「已终止」桶/列表漏掉），
+// 而 IS NULL OR 在所有方言行为严格一致。
+func TestEndReasonNotLike_UsesIsNullOR(t *testing.T) {
+	tq := buildTaskInstanceQuery(&dto.TaskQuery{EndReasonNotPrefixes: []string{"审批拒绝", "申请人撤回"}})
+	uq := buildInstanceUnionQuery("t1", "", "u1", []string{"terminated"}, "", nil, nil, "", "", "", "审批拒绝", "申请人撤回")
+	bcond, _ := bucketWhere(InstanceStatusBucket{Statuses: []string{"terminated"}, EndReasonNotPrefixes: []string{"审批拒绝", "申请人撤回"}})
+
+	for _, tc := range []struct{ name, sql string }{
+		{"buildTaskInstanceQuery", tq.conditions},
+		{"buildInstanceUnionQuery", uq.conditions},
+		{"bucketWhere", bcond},
+	} {
+		if strings.Contains(tc.sql, "COALESCE(") {
+			t.Errorf("%s: 判空不得依赖 COALESCE（空串即 NULL 的方言会退化）：%q", tc.name, tc.sql)
+		}
+		if !strings.Contains(tc.sql, "IS NULL OR") {
+			t.Errorf("%s: 判空应使用 ANSI 的 IS NULL OR：%q", tc.name, tc.sql)
+		}
 	}
 }

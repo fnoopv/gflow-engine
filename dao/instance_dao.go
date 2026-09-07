@@ -463,7 +463,7 @@ func buildTaskInstanceQuery(req *dto.TaskQuery) taskInstanceQuery {
 		if p == "" {
 			continue
 		}
-		tq.conditions += " AND COALESCE(i.end_reason,'') NOT LIKE ?"
+		tq.conditions += " AND (i.end_reason IS NULL OR i.end_reason NOT LIKE ?)"
 		tq.args = append(tq.args, p+"%")
 	}
 	if req.TaskDefKey != "" {
@@ -620,7 +620,7 @@ func buildInstanceUnionQuery(tenantID, processID, startUserID string, statuses [
 		if p == "" {
 			continue
 		}
-		uq.conditions += " AND COALESCE(end_reason,'') NOT LIKE ?"
+		uq.conditions += " AND (end_reason IS NULL OR end_reason NOT LIKE ?)"
 		uq.args = append(uq.args, p+"%")
 	}
 	if keyword != "" {
@@ -717,7 +717,7 @@ func bucketWhere(b InstanceStatusBucket) (string, []interface{}) {
 			if p == "" {
 				continue
 			}
-			cond += " AND COALESCE(end_reason,'') NOT LIKE ?"
+			cond += " AND (end_reason IS NULL OR end_reason NOT LIKE ?)"
 			args = append(args, p+"%")
 		}
 	}
