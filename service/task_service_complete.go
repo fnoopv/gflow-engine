@@ -19,7 +19,8 @@ import (
 	utils2 "github.com/rulego/gflow-engine/utils"
 )
 
-// mergeVariables 合并任务变量
+// mergeVariables 合并任务变量。既有变量为合法 JSON 但非对象时（fork-join 后 end
+// 节点的 variables 是 join 收集的分支消息数组）无法按键合并，跳过既有值只用新变量。
 func (s *TaskServiceImpl) mergeVariables(existingVariables *string, newVariables map[string]interface{}) (*string, error) {
 	if newVariables == nil {
 		return existingVariables, nil
@@ -29,8 +30,14 @@ func (s *TaskServiceImpl) mergeVariables(existingVariables *string, newVariables
 
 	// 解析现有变量
 	if existingVariables != nil && *existingVariables != "" {
-		if err := utils2.FromJSON(*existingVariables, &merged); err != nil {
+		var existing any
+		if err := utils2.FromJSON(*existingVariables, &existing); err != nil {
 			return nil, fmt.Errorf("failed to parse existing variables: %w", err)
+		}
+		if m, ok := existing.(map[string]interface{}); ok {
+			merged = m
+		} else {
+			merged = make(map[string]interface{})
 		}
 	} else {
 		merged = make(map[string]interface{})
@@ -119,8 +126,27 @@ func (s *TaskServiceImpl) completeWithApprovalInternal(ctx context.Context, scop
 
 	// Complete 与 Suspend 的竞态保护：管理员挂起实例时任务会被批量改成 Suspended，
 	// 这里拒绝避免 aspect 在已挂起实例上推进 ExecuteNext 导致状态错乱。
+	// 包一层 ErrConflict 让宿主映射 409（裸 error 会被当成 500"内部错误"）。
 	if task.Status == string(enums.TaskStatusSuspended) {
-		return fmt.Errorf("task is suspended, cannot complete until instance is resumed")
+		return fmt.Errorf("task is suspended, cannot complete until instance is resumed: %w", ErrConflict)
+	}
+	// Complete 与同节点清理的竞态保护：或签另一分支先通过（cancelSiblingActiveTasks）、
+	// 会签/票签阈值达成（cancelRemainingCountersignSubTasks）、认领互斥都会把本任务置
+	// Terminated。迟到的 complete 在锁内重读到的就是终态——放行会把已终止任务翻回
+	// Completed+approved（审计失真）并二次触发 ExecuteNext。与实例级 ErrInstanceTerminal
+	// 同口径，任何调用模式一律拒绝。
+	if task.Status == string(enums.TaskStatusTerminated) {
+		reason := ""
+		if task.EndReason != nil {
+			reason = *task.EndReason
+		}
+		return fmt.Errorf("%w (reason: %s), cannot complete", ErrTaskTerminated, reason)
+	}
+	// Pending 是"还没轮到"（顺序会签未激活子任务、待认领池），放行会越序审批；
+	// 仅拦 API——end/start 等系统节点任务初始即 Pending，After aspect 的内部
+	// Complete 靠它收尾归档
+	if task.Status == string(enums.TaskStatusPending) && GetCallingMode(ctx) == CallingModeAPI {
+		return fmt.Errorf("task is pending, cannot complete until it is activated or claimed: %w", ErrConflict)
 	}
 	// 检查所属实例状态：实例若处于非活跃态，需区分 API vs 内部调用
 	// - API 路径：实例 Suspended/Terminated/Cancelled/Failed 都拒绝（用户操作）
@@ -352,6 +378,10 @@ func (s *TaskServiceImpl) completeWithApprovalInternal(ctx context.Context, scop
 					}
 					parentInst := parentTask.ProcessInstanceID
 					parentKey := parentTask.TaskDefKey
+					// 父任务已定局，剩余未决子任务一并终止，否则留下幽灵待办且 fork 分支凑不齐
+					if cerr := s.cancelRemainingCountersignSubTasks(ctx, scope, parentTask.ID); cerr != nil {
+						logrus.WithError(cerr).WithField("parentTaskID", parentTask.ID).Warn("failed to cancel remaining sub-tasks after early veto")
+					}
 					scope.AfterCommit(func() error {
 						return s.workflowEngine.GetRuntimeServiceInternal().ExecuteNext(ctx, *parentInst, parentKey, vars)
 					})
@@ -653,9 +683,16 @@ func (s *TaskServiceImpl) Complete(ctx context.Context, actor Actor, taskID stri
 	}
 
 	// approved/comment 是控制面约定键（表达审批意图），提取完成后从业务变量中
-	// 移除，避免作为流程变量下传污染网关条件上下文。
-	delete(variables, "approved")
-	delete(variables, "comment")
+	// 移除，避免作为流程变量下传污染网关条件上下文。在副本上移除：调用方传入的
+	// map 往往还要复用（审计、重试、日志），不能被本次调用静默改写。
+	businessVars := make(map[string]interface{}, len(variables))
+	for k, v := range variables {
+		if k == "approved" || k == "comment" {
+			continue
+		}
+		businessVars[k] = v
+	}
+	request.Variables = businessVars
 
 	// 调用带审批的完成方法
 	return s.CompleteWithApproval(ctx, actor, request)

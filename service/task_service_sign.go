@@ -6,23 +6,32 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/sirupsen/logrus"
 
+	"github.com/rulego/gflow-engine/dao"
 	"github.com/rulego/gflow-engine/model"
 	"github.com/rulego/gflow-engine/types/dto"
 	"github.com/rulego/gflow-engine/types/enums"
 )
 
-// authorizeSignOperator 校验加签/减签操作者身份。
+// authorizeSignOperator 校验加签/减签操作者身份（用默认 DAO，供锁外廉价校验）。
 // 普通任务：须为 task.Assignee；countersign 父任务（无直接 assignee，审批人在子任务上）：
 // 须为该父任务任一子任务的 assignee。防越权加签/减签他人任务。
 // 注意：不做超管 bypass——加签/减签是任务参与人动作，即便是超管也须是该节点参与人。
 func (s *TaskServiceImpl) authorizeSignOperator(ctx context.Context, task *model.WfTask) error {
+	return s.authorizeSignOperatorWithDAO(ctx, s.taskDAO, task)
+}
+
+// authorizeSignOperatorWithDAO 用指定 TaskDAO 校验操作者身份。
+// 传 s.taskDAO 用于锁外廉价校验；传 scope.Tasks() 在实例锁内按最新快照复跑（收窄
+// TOCTOU 窗口：任务可能在锁外校验后被并发改派）。
+func (s *TaskServiceImpl) authorizeSignOperatorWithDAO(ctx context.Context, taskDAO *dao.TaskDAO, task *model.WfTask) error {
 	u := GetUserFromCtx(ctx)
-	if u == nil {
+	if u == nil || u.UserID == "" {
 		return fmt.Errorf("authentication required: %w", ErrPermissionDenied)
 	}
 	if task.TenantID != u.TenantID {
@@ -33,8 +42,8 @@ func (s *TaskServiceImpl) authorizeSignOperator(ctx context.Context, task *model
 		return nil
 	}
 	// countersign 父任务：操作者是任一子任务 assignee 即放行
-	if task.ID != "" {
-		if subTasks, err := s.taskDAO.GetByParentID(ctx, task.ID); err == nil {
+	if taskDAO != nil && task.ID != "" {
+		if subTasks, err := taskDAO.GetByParentID(ctx, task.ID); err == nil {
 			for _, st := range subTasks {
 				if st.Assignee != nil && *st.Assignee == u.UserID {
 					return nil
@@ -67,7 +76,15 @@ func (s *TaskServiceImpl) AddSign(ctx context.Context, actor Actor, taskID strin
 		return err
 	}
 
-	// 设计器显式禁用 addSign → 拒绝（actionPermissions 解析失败时降级放行）
+	// 被加签人租户归属校验（IdentityService 实现 TenantMembershipChecker 时生效），
+	// 防止把加签任务派给其他租户用户。
+	for _, uid := range userIDs {
+		if err := s.ensureTargetUserInTenant(ctx, task, uid, "addSign"); err != nil {
+			return err
+		}
+	}
+
+	// 设计器显式禁用 addSign → 拒绝（actionPermissions 解析失败同样 fail-closed 拒绝）
 	if err := s.requireActionEnabled(ctx, task, "addSign"); err != nil {
 		return err
 	}
@@ -92,6 +109,16 @@ func (s *TaskServiceImpl) addSignInternal(ctx context.Context, scope *InstanceSc
 	}
 	if task == nil {
 		return fmt.Errorf("%w: task", ErrNotFound)
+	}
+
+	// 锁内复校：任务可能在锁外廉价校验后被并发改派，按最新快照复跑操作者鉴权。
+	if err := s.authorizeSignOperatorWithDAO(ctx, taskDAO, task); err != nil {
+		return err
+	}
+
+	// 或签互斥/兄弟完成会置 Terminated 而 assignee 还在：不加拦会产出挂在已终结节点上的幽灵子任务
+	if task.Status != string(enums.TaskStatusActive) {
+		return fmt.Errorf("task is %s, can only add sign to an active task: %w", task.Status, ErrConflict)
 	}
 
 	now := time.Now()
@@ -189,7 +216,7 @@ func (s *TaskServiceImpl) ReduceSign(ctx context.Context, actor Actor, taskID st
 		return err
 	}
 
-	// 设计器显式禁用 reduceSign → 拒绝（actionPermissions 解析失败时降级放行）
+	// 设计器显式禁用 reduceSign → 拒绝（actionPermissions 解析失败同样 fail-closed 拒绝）
 	if err := s.requireActionEnabled(ctx, task, "reduceSign"); err != nil {
 		return err
 	}
@@ -214,6 +241,11 @@ func (s *TaskServiceImpl) reduceSignInternal(ctx context.Context, scope *Instanc
 	}
 	if task == nil {
 		return fmt.Errorf("%w: task", ErrNotFound)
+	}
+
+	// 锁内复校：任务可能在锁外廉价校验后被并发改派，按最新快照复跑操作者鉴权。
+	if err := s.authorizeSignOperatorWithDAO(ctx, taskDAO, task); err != nil {
+		return err
 	}
 
 	for _, userID := range userIDs {
@@ -283,7 +315,10 @@ func (s *TaskServiceImpl) reevaluateCountersignAfterReduce(ctx context.Context, 
 	rule := s.getApprovalRuleString(parentTask.ApprovalRule)
 	isCompleted, approved, err := s.checkCountersignSubTaskCompletionInternal(ctx, scope, parentTask.ID, rule)
 	if err != nil {
-		// 无剩余子任务(减到 0)：无人能审，终止实例避免永久卡死
+		// 只有真减光（ErrNoSubTasks）才终止实例；DAO/规则解析故障向上返回，不能误判成无人可审
+		if !errors.Is(err, ErrNoSubTasks) {
+			return err
+		}
 		if parentTask.ProcessInstanceID != nil && *parentTask.ProcessInstanceID != "" {
 			evt, terr := terminateProcessInstanceInTx(ctx, s.workflowEngine.GetRuntimeService(), scope.Tx(), *parentTask.ProcessInstanceID, "all approvers reduced during reduce-sign")
 			if terr != nil {

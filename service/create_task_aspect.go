@@ -19,15 +19,19 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"strconv"
+	"strings"
+	"time"
+
 	"github.com/rulego/gflow-engine/dao"
 	"github.com/rulego/gflow-engine/model"
 	"github.com/rulego/gflow-engine/types/constants"
 	"github.com/rulego/gflow-engine/types/enums"
 	"github.com/rulego/gflow-engine/utils/lock"
 	"github.com/rulego/rulego/api/types"
+	"github.com/rulego/rulego/utils/el"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cast"
-	"time"
 )
 
 var (
@@ -64,6 +68,21 @@ func (aspect *TaskCreator) Type() string {
 // 这里只用于 TryLock 抢占（抢不到即放弃），不存在重入/死锁问题；TTL 兜底防止
 // 持锁方崩溃后锁永不释放（实例完成后 end 不应再执行，TTL 到期释放无副作用）。
 var endNodeDedupLock = lock.DefaultKeyLock
+
+// endDedupTTL end 去重锁 TTL：持锁方崩溃后兜底释放；须覆盖 CompleteProcessInstance
+// 与 onCompleted 规则链（可能含 LLM 调用）的执行时长，锁先过期会让对端副本重复执行 end。
+const endDedupTTL = 2 * time.Minute
+
+// endDedupLocker 取 end 去重锁实现：宿主注入了分布式锁（多副本部署）则跨副本
+// 生效，否则退回进程内 LocalLock（单机部署）。
+func (aspect *TaskCreator) endDedupLocker() lock.Locker {
+	if aspect.workflowEngine != nil {
+		if l := aspect.workflowEngine.GetLocker(); l != nil {
+			return l
+		}
+	}
+	return endNodeDedupLock
+}
 
 func endNodeLockKey(instanceID string) string {
 	return "bpm:end-dedup:" + instanceID
@@ -106,7 +125,7 @@ func (aspect *TaskCreator) Before(ctx types.RuleContext, msg types.RuleMsg, rela
 	// 未抢到的重复执行直接返回（不建任务、不更新 current activity），保证
 	// end 任务只创建一条、CompleteProcessInstance / onCompleted 规则链只触发一次。
 	if ctx.Self().Type() == types.NodeTypeEnd {
-		lockVal, ok, err := endNodeDedupLock.TryLock(ctx.GetContext(), endNodeLockKey(instanceId), time.Minute)
+		lockVal, ok, err := aspect.endDedupLocker().TryLock(ctx.GetContext(), endNodeLockKey(instanceId), endDedupTTL)
 		if err != nil {
 			// 锁服务异常时保守放行（宁可重复执行也不能卡死流程）
 			logrus.WithError(err).Warnf("end-node dedup TryLock error, allow execution, instanceId: %s", instanceId)
@@ -122,9 +141,11 @@ func (aspect *TaskCreator) Before(ctx types.RuleContext, msg types.RuleMsg, rela
 	if ctx.Self().Type() != constants.TaskTypeUserTask {
 		data := msg.GetData()
 		var name, desc string
+		var nodeConfig types.Configuration
 		if chainCtx, ok := ctx.RuleChain().(types.ChainCtx); ok {
 			if ruleNode, ok := chainCtx.Definition().GetNode(ctx.GetSelfId()); ok {
 				name = ruleNode.Name
+				nodeConfig = ruleNode.Configuration
 				if v, ok := ruleNode.GetAdditionalInfo(constants.KeyDescription); ok {
 					desc = cast.ToString(v)
 				}
@@ -137,12 +158,17 @@ func (aspect *TaskCreator) Before(ctx types.RuleContext, msg types.RuleMsg, rela
 		// 恢复路径：metadata 里已有 task_id（由 RestoreProcessInstance 注入），
 		// 说明该节点对应的 wf_task 已经存在（上次执行到一半被重启打断）。
 		// 此时必须跳过 CreateTask，否则会产生重复 wf_task，且旧 task 永远停在 Pending。
-		existingTaskId := msg.GetMetadata().GetValue(constants.KeyTaskID)
-		if existingTaskId != "" {
-			return msg
+		// 只有 task_id 属于当前节点才可跳过——上游节点（startTask/userTask）建行后
+		// task_id 会沿消息传下来，残留值不能吞掉本节点的任务行。
+		if existingTaskId := msg.GetMetadata().GetValue(constants.KeyTaskID); existingTaskId != "" {
+			if t, err := aspect.workflowEngine.GetTaskService().GetTask(ctx.GetContext(), SystemActor(), existingTaskId); err == nil &&
+				t != nil && t.TaskDefKey == ctx.GetSelfId() {
+				return msg
+			}
 		}
 		processId := msg.GetMetadata().GetValue(constants.KeyProcessID)
 		// 记录任务
+		createdAt := time.Now()
 		task := &model.WfTask{
 			ProcessInstanceID: &instanceId,
 			ProcessID:         processId,
@@ -151,11 +177,16 @@ func (aspect *TaskCreator) Before(ctx types.RuleContext, msg types.RuleMsg, rela
 			Name:              name,
 			Description:       &desc,
 			Assignee:          nil,
-			CreatedAt:         time.Now(),
+			CreatedAt:         createdAt,
 			CreatedBy:         constants.UserSystem,
 			Status:            string(enums.TaskStatusPending),
 			Variables:         &data,
 			TenantID:          msg.GetMetadata().GetValue(constants.KeyTenantID),
+		}
+		// delay 任务建行时落到期时间：模板表达式只有此刻能求值，
+		// 超期检测与救援据此判定
+		if dueDate := delayTaskDueDate(ctx, msg, ctx.Self().Type(), nodeConfig, createdAt); dueDate != nil {
+			task.DueDate = dueDate
 		}
 		// 节点自动创建任务：系统动作，操作人取 SystemActor
 		_, err = aspect.workflowEngine.GetTaskService().CreateTask(ctx.GetContext(), SystemActor(), task)
@@ -217,7 +248,7 @@ func (aspect *TaskCreator) After(ctx types.RuleContext, msg types.RuleMsg, err e
 	if ctx.Self().Type() == types.NodeTypeEnd {
 		lockVal := msg.GetMetadata().GetValue(constants.KeyEndExecLock)
 		defer func() {
-			if err := endNodeDedupLock.Unlock(context.Background(), endNodeLockKey(instanceId), lockVal); err != nil {
+			if err := aspect.endDedupLocker().Unlock(context.Background(), endNodeLockKey(instanceId), lockVal); err != nil {
 				logrus.WithError(err).Debugf("end-node dedup unlock failed, instanceId: %s", instanceId)
 			}
 		}()
@@ -256,8 +287,14 @@ func (aspect *TaskCreator) handleProcessInstanceFailure(ctx types.RuleContext, m
 		reason = err.Error()
 	}
 
-	// 终止流程实例
-	if terminateErr := aspect.instanceDAO.TerminateInstance(ctx.GetContext(), instanceId, reason); terminateErr != nil {
+	// 走完整终止链路（级联终止任务+归档+事件）：只改实例状态会把活跃任务留在
+	// 候选人待办里（后续操作全被实例终态守卫拒绝），实例行也不归档
+	internalCtx := WithInternalCallingMode(ctx.GetContext())
+	actor := ActorFromCtx(internalCtx)
+	if actor.TenantID == "" {
+		actor.TenantID = msg.GetMetadata().GetValue(constants.KeyTenantID)
+	}
+	if terminateErr := aspect.workflowEngine.GetRuntimeService().TerminateProcessInstance(internalCtx, actor, instanceId, reason); terminateErr != nil {
 		logrus.WithError(terminateErr).Errorf("Failed to terminate process instance: %s", instanceId)
 	} else {
 		logrus.Infof("Process instance terminated due to failure: %s, reason: %s", instanceId, reason)
@@ -332,4 +369,44 @@ func (aspect *TaskCreator) nodeHasFailureEdge(ctx types.RuleContext, msg types.R
 		}
 	}
 	return false
+}
+
+// delayTaskDueDate 计算 delay 任务行的到期时间（base + 时长）；非 delay 节点
+// 或求不出时长时返回 nil，DueDate 留空。时长来源与 delay 节点自身口径一致：
+// delayMs 优先（纯数字直取，模板表达式用消息上下文求值），兼容已废弃的
+// periodInSeconds（×1000）。
+func delayTaskDueDate(ctx types.RuleContext, msg types.RuleMsg, nodeType string, nodeConfig types.Configuration, base time.Time) *time.Time {
+	if nodeType != constants.NodeTypeDelay {
+		return nil
+	}
+	if ms, ok := delayDurationMs(ctx, msg, nodeConfig); ok {
+		due := base.Add(time.Duration(ms) * time.Millisecond)
+		return &due
+	}
+	logrus.Debugf("delay task due date unresolved, nodeId: %s", ctx.GetSelfId())
+	return nil
+}
+
+// delayDurationMs 从节点配置解析延迟毫秒数：delayMs 纯数字直接取，模板表达式
+// 按节点消息上下文求值后取整；均不可用时回退 periodInSeconds。解析失败返回 false。
+func delayDurationMs(ctx types.RuleContext, msg types.RuleMsg, nodeConfig types.Configuration) (int64, bool) {
+	delayMs := strings.TrimSpace(cast.ToString(nodeConfig["delayMs"]))
+	if delayMs != "" {
+		if v, err := strconv.ParseInt(delayMs, 10, 64); err == nil {
+			return v, true
+		}
+		tmpl, err := el.NewTemplate(delayMs)
+		if err != nil {
+			return 0, false
+		}
+		rendered := strings.TrimSpace(tmpl.ExecuteAsString(ctx.GetEnv(msg, true)))
+		if v, err := strconv.ParseInt(rendered, 10, 64); err == nil {
+			return v, true
+		}
+		return 0, false
+	}
+	if seconds := cast.ToInt(nodeConfig["periodInSeconds"]); seconds > 0 {
+		return int64(seconds) * 1000, true
+	}
+	return 0, false
 }

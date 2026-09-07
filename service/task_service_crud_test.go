@@ -42,7 +42,8 @@ func secFixDB(t *testing.T) *query.Query {
 			priority INTEGER NOT NULL DEFAULT 50, parent_id TEXT, tenant_id TEXT NOT NULL,
 			created_by TEXT NOT NULL, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_by TEXT, updated_at DATETIME, end_reason TEXT, duration INTEGER, ended_at DATETIME,
-			start_user_id TEXT NOT NULL
+			start_user_id TEXT NOT NULL,
+			UNIQUE (tenant_id, business_key)
 		)`,
 		`CREATE TABLE IF NOT EXISTS wf_task (
 			id TEXT PRIMARY KEY, process_instance_id TEXT, process_id TEXT, parent_id TEXT,
@@ -62,6 +63,19 @@ func secFixDB(t *testing.T) *query.Query {
 			ended_at DATETIME, comment TEXT, end_reason TEXT, duration INTEGER,
 			tenant_id TEXT, created_by TEXT, created_at DATETIME, updated_by TEXT, updated_at DATETIME
 		)`,
+		`CREATE TABLE IF NOT EXISTS wf_task_assignee (
+			id TEXT PRIMARY KEY, task_id TEXT NOT NULL,
+			entity_type TEXT NOT NULL DEFAULT 'person', entity_id TEXT NOT NULL,
+			tenant_id TEXT NOT NULL, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE TABLE IF NOT EXISTS wf_hi_instance (
+			id TEXT PRIMARY KEY, process_id TEXT NOT NULL, business_key TEXT, name TEXT NOT NULL,
+			status TEXT NOT NULL, variables TEXT, current_activity TEXT,
+			priority INTEGER NOT NULL DEFAULT 50, parent_id TEXT, tenant_id TEXT NOT NULL,
+			created_by TEXT NOT NULL, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_by TEXT, updated_at DATETIME, end_reason TEXT, duration INTEGER, ended_at DATETIME,
+			start_user_id TEXT NOT NULL DEFAULT ''
+		)`,
 	}
 	for _, ddl := range ddls {
 		require.NoError(t, db.Exec(ddl).Error)
@@ -69,6 +83,7 @@ func secFixDB(t *testing.T) *query.Query {
 	db.Exec("DELETE FROM wf_instance")
 	db.Exec("DELETE FROM wf_task")
 	db.Exec("DELETE FROM wf_hi_task")
+	db.Exec("DELETE FROM wf_hi_instance")
 	return query.Use(db)
 }
 
@@ -140,4 +155,59 @@ func TestSecFix_DeleteTaskUnassignedFailsClosed(t *testing.T) {
 	count, cerr := q.WfTask.WithContext(ctx).Where(q.WfTask.ID.Eq("task-del")).Count()
 	require.NoError(t, cerr)
 	require.EqualValues(t, 1, count)
+}
+
+// TestSecFix_SystemDeleteActiveInstance 系统身份删除 active 实例上的任务应成功：
+// 与普通删除同一条 WithInstanceTx 持锁路径，不绕过实例行锁。
+func TestSecFix_SystemDeleteActiveInstance(t *testing.T) {
+	q := candGroupDB(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	require.NoError(t, q.WfInstance.Create(&model.WfInstance{
+		ID: "inst-sys-active", ProcessID: "p1", Name: "sys_del_active",
+		Status: string(enums.InstanceStatusActive), StartUserID: "starter",
+		TenantID: "t1", CreatedBy: "starter", CreatedAt: now,
+	}))
+	require.NoError(t, q.WfTask.Create(&model.WfTask{
+		ID: "task-sys-active", ProcessInstanceID: secFixStrPtr("inst-sys-active"), TaskDefKey: "approve",
+		Name: "审批", TaskType: "user_task", Status: string(enums.TaskStatusActive),
+		Assignee: secFixStrPtr("userA"), TenantID: "t1", CreatedBy: "system", CreatedAt: now,
+	}))
+
+	taskSvc := &TaskServiceImpl{taskDAO: dao.NewTaskDAOWithQuery(q), workflowEngine: &testEngineDouble{}}
+	require.NoError(t, taskSvc.DeleteTask(ctx, SystemActor(), "task-sys-active", "cleanup"))
+
+	count, cerr := q.WfTask.WithContext(ctx).Where(q.WfTask.ID.Eq("task-sys-active")).Count()
+	require.NoError(t, cerr)
+	require.EqualValues(t, 0, count, "系统身份删除 active 实例任务后应已删除")
+}
+
+// TestSecFix_SystemDeleteTerminalInstanceRejected 系统身份删除终态实例上的任务应被
+// WithInstanceTx 拒绝（ErrInstanceTerminal），证明系统删除与普通删除一样受实例锁与
+// 终态守卫约束。
+func TestSecFix_SystemDeleteTerminalInstanceRejected(t *testing.T) {
+	q := candGroupDB(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	require.NoError(t, q.WfInstance.Create(&model.WfInstance{
+		ID: "inst-sys-terminal", ProcessID: "p1", Name: "sys_del_term",
+		Status: string(enums.InstanceStatusCompleted), StartUserID: "starter",
+		TenantID: "t1", CreatedBy: "starter", CreatedAt: now, EndedAt: &now,
+	}))
+	require.NoError(t, q.WfTask.Create(&model.WfTask{
+		ID: "task-sys-terminal", ProcessInstanceID: secFixStrPtr("inst-sys-terminal"), TaskDefKey: "approve",
+		Name: "审批", TaskType: "user_task", Status: string(enums.TaskStatusActive),
+		Assignee: secFixStrPtr("userA"), TenantID: "t1", CreatedBy: "system", CreatedAt: now,
+	}))
+
+	taskSvc := &TaskServiceImpl{taskDAO: dao.NewTaskDAOWithQuery(q), workflowEngine: &testEngineDouble{}}
+	err := taskSvc.DeleteTask(ctx, SystemActor(), "task-sys-terminal", "cleanup")
+	require.Error(t, err, "系统身份删除终态实例任务必须被拒绝")
+	require.True(t, errors.Is(err, ErrInstanceTerminal), "期望 ErrInstanceTerminal，got %v", err)
+
+	count, cerr := q.WfTask.WithContext(ctx).Where(q.WfTask.ID.Eq("task-sys-terminal")).Count()
+	require.NoError(t, cerr)
+	require.EqualValues(t, 1, count, "终态实例任务应保留（未被绕过锁直删）")
 }

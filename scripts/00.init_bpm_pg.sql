@@ -94,7 +94,11 @@ CREATE TABLE IF NOT EXISTS wf_instance
 
     end_reason        VARCHAR(2000),         -- 完成/终止原因（包含错误信息）
     duration          BIGINT,                -- 运行时长（毫秒）
-    ended_at          TIMESTAMPTZ            -- 结束时间
+    ended_at          TIMESTAMPTZ,           -- 结束时间
+
+    -- businessKey 唯一兜底：同租户下 (tenant_id, business_key) 唯一，拦截并发
+    -- 双发起（先查+插入的竞态窗口）。空 business_key 不参与唯一（引擎自动生成）。
+    CONSTRAINT uq_wf_instance_tenant_bizkey UNIQUE (tenant_id, business_key)
 );
 
 COMMENT ON TABLE  wf_instance IS '运行时流程实例表';
@@ -124,6 +128,7 @@ CREATE INDEX IF NOT EXISTS idx_instance_created_at    ON wf_instance (created_at
 CREATE INDEX IF NOT EXISTS idx_instance_priority      ON wf_instance (priority DESC, created_at ASC); -- 待办/抢单排序
 CREATE INDEX IF NOT EXISTS idx_instance_tenant_status ON wf_instance (tenant_id, status, created_at DESC); -- 管理端列表
 CREATE INDEX IF NOT EXISTS idx_instance_tenant_starter ON wf_instance (tenant_id, start_user_id); -- 我发起的
+CREATE INDEX IF NOT EXISTS idx_instance_process        ON wf_instance (process_id, created_at DESC); -- 流程定义维度的实例列表/统计
 
 -- 3. 历史流程实例表
 CREATE TABLE IF NOT EXISTS wf_hi_instance
@@ -179,6 +184,7 @@ CREATE INDEX IF NOT EXISTS idx_hist_instance_ended     ON wf_hi_instance (ended_
 CREATE INDEX IF NOT EXISTS idx_hist_instance_duration  ON wf_hi_instance (duration);
 CREATE INDEX IF NOT EXISTS idx_hist_inst_tenant_status ON wf_hi_instance (tenant_id, status, created_at DESC); -- 管理端历史列表
 CREATE INDEX IF NOT EXISTS idx_hist_inst_tenant_starter ON wf_hi_instance (tenant_id, start_user_id); -- 我发起的(历史)
+CREATE INDEX IF NOT EXISTS idx_hist_instance_process    ON wf_hi_instance (process_id, created_at DESC); -- 流程定义维度的历史实例列表
 
 -- 4. 运行时任务表  wf_task  —— 只保留“进行中”需要更新的字段
 CREATE TABLE IF NOT EXISTS wf_task

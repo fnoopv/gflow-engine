@@ -9,15 +9,21 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/rulego/gflow-engine/model"
 	"github.com/rulego/gflow-engine/types/enums"
 	utils2 "github.com/rulego/gflow-engine/utils"
 )
 
-// SetAssignee 设置任务分配人
+// SetAssignee 设置任务分配人。
+// 强制改派任意任务的办理人，与 Reassign 同属管理操作：必须管理员（SuperAdmin）
+// 或系统身份，普通用户无权调用（否则可劫持他人任务或解除分配使任务回池）。
 func (s *TaskServiceImpl) SetAssignee(ctx context.Context, actor Actor, taskID, userID string) error {
 	ctx = bindActor(ctx, actor)
 	if taskID == "" {
 		return fmt.Errorf("task ID cannot be empty")
+	}
+	if err := requireAdminIdentity(&actor); err != nil {
+		return err
 	}
 
 	task, err := s.taskDAO.Get(ctx, taskID)
@@ -79,11 +85,16 @@ func (s *TaskServiceImpl) setAssigneeInternal(ctx context.Context, scope *Instan
 	return nil
 }
 
-// SetOwner 设置任务所有者
+// SetOwner 设置任务所有者。
+// Owner 驱动委派归还路径，篡改即改写审批走向，属管理操作：必须管理员（SuperAdmin）
+// 或系统身份。
 func (s *TaskServiceImpl) SetOwner(ctx context.Context, actor Actor, taskID, userID string) error {
 	ctx = bindActor(ctx, actor)
 	if taskID == "" {
 		return fmt.Errorf("task ID cannot be empty")
+	}
+	if err := requireAdminIdentity(&actor); err != nil {
+		return err
 	}
 
 	task, err := s.taskDAO.Get(ctx, taskID)
@@ -159,7 +170,13 @@ func (s *TaskServiceImpl) Delegate(ctx context.Context, actor Actor, taskID, use
 		return err
 	}
 
-	// 设计器显式禁用 delegate → 拒绝（actionPermissions 解析失败时降级放行）
+	// 目标用户租户归属校验（IdentityService 实现 TenantMembershipChecker 时生效），
+	// 与 Transfer/Reassign 同口径，防止把任务委派给其他租户用户。
+	if err := s.ensureTargetUserInTenant(ctx, task, userID, "delegate"); err != nil {
+		return err
+	}
+
+	// 设计器显式禁用 delegate → 拒绝（actionPermissions 解析失败同样 fail-closed 拒绝）
 	if err := s.requireActionEnabled(ctx, task, "delegate"); err != nil {
 		return err
 	}
@@ -196,10 +213,14 @@ func (s *TaskServiceImpl) delegateInternal(ctx context.Context, scope *InstanceS
 	}
 
 	u := GetUserFromCtx(ctx)
-	if u == nil {
+	if u == nil || u.UserID == "" {
 		return ErrAuthenticationRequired
 	}
-	if task.Assignee != nil && *task.Assignee != "" && *task.Assignee != u.UserID {
+	// fail-closed：仅当前 assignee 可委派；未分配（pending）任务无从委派，直接拒绝。
+	if task.Assignee == nil || *task.Assignee == "" {
+		return fmt.Errorf("task is not assigned, cannot delegate: %w", ErrPermissionDenied)
+	}
+	if *task.Assignee != u.UserID {
 		return fmt.Errorf("task assigned to %s, current user %s: %w", *task.Assignee, u.UserID, ErrPermissionDenied)
 	}
 	// 禁止委派给自己:self-delegate 会让 Owner==Assignee==DelegateFrom,approve 时
@@ -217,7 +238,9 @@ func (s *TaskServiceImpl) delegateInternal(ctx context.Context, scope *InstanceS
 			task.DelegateFrom = &currentUser.UserID
 		}
 	}
-	if task.Assignee != nil && *task.Assignee != "" {
+	// 仅首次委派记录 Owner；链式委派（A→B→C）不得覆盖，否则 C 审完归还 B、
+	// B 通过即完成节点，最初的 A 被静默跳过。
+	if (task.Owner == nil || *task.Owner == "") && task.Assignee != nil && *task.Assignee != "" {
 		task.Owner = task.Assignee
 	}
 
@@ -301,6 +324,26 @@ func (s *TaskServiceImpl) Resolve(ctx context.Context, actor Actor, taskID strin
 	})
 }
 
+// authorizeResolveOperator 校验委派归还（Resolve）的操作人：须为任务当前办理人
+// （被委派人 assignee）、原办理人（owner）或管理员/系统身份。由 resolveInternal 在
+// 实例行锁内读的最新任务快照上执行，避免锁外读被并发改派绕过的 TOCTOU 窗口。
+func (s *TaskServiceImpl) authorizeResolveOperator(ctx context.Context, task *model.WfTask) error {
+	u := GetUserFromCtx(ctx)
+	if u == nil || u.UserID == "" {
+		return ErrAuthenticationRequired
+	}
+	if u.SuperAdmin || IsSystemActor(u) {
+		return nil
+	}
+	if task.Assignee != nil && *task.Assignee == u.UserID {
+		return nil
+	}
+	if task.Owner != nil && *task.Owner == u.UserID {
+		return nil
+	}
+	return fmt.Errorf("user %s is neither delegatee nor owner of task %s: %w", u.UserID, task.ID, ErrPermissionDenied)
+}
+
 func (s *TaskServiceImpl) resolveInternal(ctx context.Context, scope *InstanceScope, taskID string) error {
 	taskDAO := scope.Tasks()
 	task, err := taskDAO.Get(ctx, taskID)
@@ -309,6 +352,11 @@ func (s *TaskServiceImpl) resolveInternal(ctx context.Context, scope *InstanceSc
 	}
 	if task == nil {
 		return fmt.Errorf("%w: task", ErrNotFound)
+	}
+
+	// 鉴权：仅被委派人（assignee）、原办理人（owner）或管理员/系统身份可归还。
+	if err := s.authorizeResolveOperator(ctx, task); err != nil {
+		return err
 	}
 
 	// 幂等：已经没有 Owner（说明已 resolve 过）
@@ -385,7 +433,7 @@ func (s *TaskServiceImpl) Transfer(ctx context.Context, actor Actor, taskID, toU
 		return err
 	}
 
-	// 设计器显式禁用 transfer → 拒绝（actionPermissions 解析失败时降级放行）
+	// 设计器显式禁用 transfer → 拒绝（actionPermissions 解析失败同样 fail-closed 拒绝）
 	if err := s.requireActionEnabled(ctx, task, "transfer"); err != nil {
 		return err
 	}
@@ -424,12 +472,18 @@ func (s *TaskServiceImpl) transferInternal(ctx context.Context, scope *InstanceS
 	if u := GetUserFromCtx(ctx); u != nil && task.TenantID != u.TenantID {
 		return fmt.Errorf("%w: task", ErrNotFound)
 	}
-	// 操作人以显式参数 fromUserID 为准：只有任务当前 assignee 能转办
-	if task.Assignee != nil && *task.Assignee != fromUserID {
+	// 操作人以显式参数 fromUserID 为准：只有任务当前 assignee 能转办；
+	// 未分配任务（assignee 为空/nil）无从转办，fail-closed 拒绝。
+	if task.Assignee == nil || *task.Assignee != fromUserID {
 		return fmt.Errorf("only assigned user can transfer task: %w", ErrPermissionDenied)
 	}
 
 	task.Assignee = &toUserID
+	// 清委派上下文：转办后新受理人即最终办理人，残留 Owner 会让其 approve 走
+	// resolveDelegatedApproval 变成"归还旧 owner"而不流转（与 applyReassign 同口径）。
+	// gorm struct Updates 忽略 nil 字段，用空串指针强制写入（owner=="" 语义等同无 owner）。
+	emptyOwner := ""
+	task.Owner = &emptyOwner
 	username := ""
 	if u := GetUserFromCtx(ctx); u != nil {
 		username = u.UserName

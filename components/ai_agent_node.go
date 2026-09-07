@@ -17,6 +17,8 @@
 package components
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -345,6 +347,13 @@ func (n *AIAgentNode) OnMsg(ctx types.RuleContext, msg types.RuleMsg) {
 		return
 	}
 
+	// 重驱/恢复重入本节点时，实例变量里已有「同输入」的成功输出则直接续跑，
+	// 不再调用 LLM。输入指纹不匹配（驳回回跳后表单已改）视为缓存失效重新
+	// 调用；崩溃重驱时消息从库恢复、输入一致，指纹命中即复用。
+	if !n.Config.Async && n.reuseCachedOutput(ctx, msg, inputFingerprint(payload)) {
+		return
+	}
+
 	agentMsg := msg.Copy()
 	agentMsg.DataType = types.JSON
 	agentMsg.SetData(str.ToString(payload))
@@ -374,6 +383,9 @@ func (n *AIAgentNode) OnMsg(ctx types.RuleContext, msg types.RuleMsg) {
 		n.handleFailure(ctx, msg, runErr)
 		return
 	}
+
+	// 成功输出连同输入指纹落实例变量，重驱/恢复重入本节点时直接复用，不再调用 LLM
+	n.persistOutputForReuse(ctx, msg, inputFingerprint(payload), output.GetData())
 
 	// 合并智能体输出的 metadata + data 到主流程 msg
 	wrapperMsg := msg.Copy()
@@ -765,6 +777,117 @@ func (n *AIAgentNode) routeByHumanDecision(ctx types.RuleContext, msg types.Rule
 	msg.Metadata.PutValue(MetaKeyAIDecision, string(AIDecisionHumanPass))
 	logrus.Infof("AIAgentNode %s: human approved on fallback task → continue to next node, instance=%s", n.GetSelfId(), instanceID)
 	ctx.TellSuccess(msg)
+	return true
+}
+
+// aiOutputVarKey 节点结果缓存的实例变量键（按节点隔离）。
+func (n *AIAgentNode) aiOutputVarKey() string {
+	return "ai_out_" + n.GetSelfId()
+}
+
+// aiOutputCache 结果缓存值：输入指纹 + 输出成对存储。指纹不匹配视为缓存
+// 失效，防止驳回回跳（表单已改）复用首次的旧审查结论。
+type aiOutputCache struct {
+	In  string `json:"in"`
+	Out string `json:"out"`
+}
+
+// inputFingerprint 输入载荷的短指纹（sha256 前 16 位 hex）：重驱恢复的消息
+// 与首次执行逐字节一致时命中；任何输入变化都会得到不同指纹。
+func inputFingerprint(payload []byte) string {
+	sum := sha256.Sum256(payload)
+	return hex.EncodeToString(sum[:8])
+}
+
+// actorFromCtxOrMeta 取节点回调用身份：ctx 无身份（内部驱动）时按系统动作处理，
+// 并从链元数据补齐租户（实例变量的租户校验依赖 TenantID）。
+func actorFromCtxOrMeta(ctx types.RuleContext, msg types.RuleMsg) service.Actor {
+	actor := service.ActorFromCtx(ctx.GetContext())
+	if actor.TenantID == "" {
+		actor.TenantID = metaValue(msg, constants.KeyTenantID)
+	}
+	return actor
+}
+
+// persistOutputForReuse 把同步调用的成功输出连同输入指纹写入实例变量（引擎
+// 实例锁事务内合并）。空输出不落：无法与未执行过区分。写失败仅告警，不阻断
+// 本轮流转。
+func (n *AIAgentNode) persistOutputForReuse(ctx types.RuleContext, msg types.RuleMsg, fingerprint, output string) {
+	if n.RuntimeService == nil {
+		return
+	}
+	if strings.TrimSpace(output) == "" {
+		return
+	}
+	instanceID := metaValue(msg, constants.KeyInstanceID)
+	if instanceID == "" {
+		return
+	}
+	buf, err := json.Marshal(aiOutputCache{In: fingerprint, Out: output})
+	if err != nil {
+		logrus.WithError(err).Warnf("AIAgentNode %s: marshal output cache failed", n.GetSelfId())
+		return
+	}
+	if err := n.RuntimeService.SetProcessInstanceVariable(
+		ctx.GetContext(), actorFromCtxOrMeta(ctx, msg), instanceID, n.aiOutputVarKey(), string(buf)); err != nil {
+		logrus.WithError(err).Warnf("AIAgentNode %s: persist output for reuse failed", n.GetSelfId())
+	}
+}
+
+// reuseCachedOutput 实例变量里已有本节点「同输入指纹」的成功输出时跳过 LLM 调用，
+// 把缓存输出与消息合并后按首次成功路径继续流转（启用裁决时同样重新提取裁决路由）。
+// 指纹不匹配（输入已变）或缓存格式不符（旧版纯文本输出）都返回 false 重新调用。
+// 返回 true 表示本轮 OnMsg 已终结。
+func (n *AIAgentNode) reuseCachedOutput(ctx types.RuleContext, msg types.RuleMsg, fingerprint string) bool {
+	if n.RuntimeService == nil {
+		return false
+	}
+	instanceID := metaValue(msg, constants.KeyInstanceID)
+	if instanceID == "" {
+		return false
+	}
+	v, err := n.RuntimeService.GetProcessInstanceVariable(
+		ctx.GetContext(), actorFromCtxOrMeta(ctx, msg), instanceID, n.aiOutputVarKey())
+	if err != nil {
+		logrus.WithError(err).Warnf("AIAgentNode %s: read cached output failed, proceed to AI call", n.GetSelfId())
+		return false
+	}
+	raw, ok := v.(string)
+	if !ok || strings.TrimSpace(raw) == "" {
+		return false
+	}
+	var cacheEntry aiOutputCache
+	if err := json.Unmarshal([]byte(raw), &cacheEntry); err != nil ||
+		cacheEntry.In != fingerprint || strings.TrimSpace(cacheEntry.Out) == "" {
+		logrus.WithField("instanceId", instanceID).
+			Info("AIAgentNode cached output invalidated (input changed or legacy format), re-calling LLM")
+		return false
+	}
+	cached := cacheEntry.Out
+	logrus.Infof("AIAgentNode %s: reuse cached output, skip LLM call, instance=%s", n.GetSelfId(), instanceID)
+
+	wrapperMsg := msg.Copy()
+	if wrapperMsg.Metadata == nil {
+		wrapperMsg.Metadata = types.NewMetadata()
+	}
+	if err := MergeAgentOutput(&wrapperMsg, []byte(cached), n.Config.OutputMappings,
+		n.reservedKey(), n.flattenOutput()); err != nil {
+		// 合并失败时保留原 msg（避免冲掉表单），缓存仍视为已消费，继续流转
+		logrus.WithError(err).Warn("AIAgentNode reuse cached output merge failed, keep original msg")
+	}
+	if n.decisionEnabled() {
+		decision := ExtractDecision(cached)
+		wrapperMsg.Metadata.PutValue(MetaKeyAIDecision, string(decision))
+		switch decision {
+		case AIDecisionReject:
+			n.handleReject(ctx, wrapperMsg)
+			return true
+		case AIDecisionUnresolved:
+			n.handleUnresolved(ctx, wrapperMsg, types.NewMsg(0, "wf_ai_reuse", types.JSON, nil, cached))
+			return true
+		}
+	}
+	ctx.TellSuccess(wrapperMsg)
 	return true
 }
 

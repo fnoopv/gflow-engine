@@ -57,7 +57,7 @@ type RuntimeServiceImpl struct {
 
 // NewRuntimeService 创建RuntimeService实例
 func NewRuntimeService(workflowEngine WorkflowEngine) RuntimeService {
-	return &RuntimeServiceImpl{
+	s := &RuntimeServiceImpl{
 		instanceDAO:    dao.NewInstanceDAO(),
 		hiInstanceDAO:  dao.NewHiInstanceDAO(),
 		processDAO:     dao.NewProcessDAO(),
@@ -66,11 +66,13 @@ func NewRuntimeService(workflowEngine WorkflowEngine) RuntimeService {
 		enginePool:     rulego.NewRuleGo(),
 		workflowEngine: workflowEngine,
 	}
+	runtimeServiceRegistry.Store(s, struct{}{})
+	return s
 }
 
 // NewRuntimeServiceWithQuery 创建带Query参数的RuntimeService实例
 func NewRuntimeServiceWithQuery(query *query.Query, workflowEngine WorkflowEngine) RuntimeService {
-	return &RuntimeServiceImpl{
+	s := &RuntimeServiceImpl{
 		instanceDAO:    dao.NewInstanceDAOWithQuery(query),
 		hiInstanceDAO:  dao.NewHiInstanceDAOWithQuery(query),
 		processDAO:     dao.NewProcessDAOWithQuery(query),
@@ -79,6 +81,8 @@ func NewRuntimeServiceWithQuery(query *query.Query, workflowEngine WorkflowEngin
 		enginePool:     rulego.NewRuleGo(),
 		workflowEngine: workflowEngine,
 	}
+	runtimeServiceRegistry.Store(s, struct{}{})
+	return s
 }
 
 // StartProcessInstanceByKey 根据流程定义Key启动流程实例
@@ -126,6 +130,13 @@ func (s *RuntimeServiceImpl) StartProcessInstanceByID(ctx context.Context, actor
 		return "", err
 	}
 
+	// 仅 active 可发起新实例；停用/草稿定义的存量实例继续办理不经此处。
+	// subProcess 子实例走 startInstanceCore 直调，不受此限制。
+	if processDef.Status != string(enums.ProcessStatusActive) {
+		return "", fmt.Errorf("process definition %s is %s and cannot start new instances: %w",
+			processDef.ProcessKey, processDef.Status, ErrValidation)
+	}
+
 	// 发起人范围强校验（流程级 additionalInfo.starterScope；未配置=全员可发起）
 	if err := s.checkStarterScope(ctx, processDef, initiator); err != nil {
 		return "", err
@@ -154,6 +165,10 @@ func (s *RuntimeServiceImpl) StartProcessInstanceByID(ctx context.Context, actor
 		return "", err
 	}
 	if engine != nil {
+		// 与对端副本的恢复/AfterCommit 驱动共用同一把门闩，避免并发重入同一实例重复建首任务
+		if unlock := s.acquireDistExecGate(ctx, instanceID); unlock != nil {
+			defer unlock()
+		}
 		engine.OnMsg(msg) // 父实例同步驱动
 	}
 	// 发起事件：非草稿实例启动后派发（草稿在激活时发 activated）
@@ -225,6 +240,12 @@ func (s *RuntimeServiceImpl) startInstanceCore(ctx context.Context, processDef *
 
 	// 保存流程实例
 	if err := s.instanceDAO.Create(ctx, instance); err != nil {
+		// 唯一约束兜底：并发同 businessKey 双发起时先查会双双通过，靠数据库
+		// 唯一索引拦下后到者，映射为与先查一致的冲突友好错误
+		if isUniqueViolation(err) {
+			return "", nil, types.RuleMsg{}, fmt.Errorf(
+				"active process instance with business key '%s' already exists: %w", businessKey, ErrConflict)
+		}
 		return "", nil, types.RuleMsg{}, fmt.Errorf("failed to create process instance: %w", err)
 	}
 
@@ -306,7 +327,17 @@ func (s *RuntimeServiceImpl) DeleteProcessInstance(ctx context.Context, actor Ac
 			return err
 		}
 
-		// 2. 终止活跃任务并归档所有任务到历史表
+		// 2. 草稿未进入流转，无历史可归档，直接物理删除
+		if instance.Status == string(enums.InstanceStatusDraft) {
+			if _, err := tx.WfInstance.WithContext(ctx).Where(tx.WfInstance.ID.Eq(processInstanceID)).Delete(); err != nil {
+				return fmt.Errorf("failed to delete draft instance: %w", err)
+			}
+			// 草稿创建可能已装载租户池，best-effort 驱逐
+			s.evictStaleChain(ctx, tx, instance.TenantID, instance.ProcessID)
+			return nil
+		}
+
+		// 3. 终止活跃任务并归档所有任务到历史表
 		tasks, err := tx.WfTask.WithContext(ctx).Where(tx.WfTask.ProcessInstanceID.Eq(processInstanceID)).Find()
 		if err != nil {
 			return fmt.Errorf("failed to get tasks for archiving: %w", err)
@@ -331,7 +362,7 @@ func (s *RuntimeServiceImpl) DeleteProcessInstance(ctx context.Context, actor Ac
 			}
 		}
 
-		// 3. 归档实例到历史表
+		// 4. 归档实例到历史表
 		now := time.Now()
 		hiInstance := &model.WfHiInstance{
 			ID:              instance.ID,
@@ -357,7 +388,7 @@ func (s *RuntimeServiceImpl) DeleteProcessInstance(ctx context.Context, actor Ac
 			return fmt.Errorf("failed to archive instance to history: %w", err)
 		}
 
-		// 4. 清理候选池 wf_task_assignee（避免孤儿，参照 TaskDAO.DeleteByProcessInstanceID）
+		// 5. 清理候选池 wf_task_assignee（避免孤儿，参照 TaskDAO.DeleteByProcessInstanceID）
 		taskIDs := make([]string, 0, len(tasks))
 		for _, t := range tasks {
 			taskIDs = append(taskIDs, t.ID)
@@ -368,12 +399,12 @@ func (s *RuntimeServiceImpl) DeleteProcessInstance(ctx context.Context, actor Ac
 			}
 		}
 
-		// 5. 删除原始任务记录
+		// 6. 删除原始任务记录
 		if _, err := tx.WfTask.WithContext(ctx).Where(tx.WfTask.ProcessInstanceID.Eq(processInstanceID)).Delete(); err != nil {
 			return fmt.Errorf("failed to delete tasks: %w", err)
 		}
 
-		// 6. 删除原始实例记录
+		// 7. 删除原始实例记录
 		if _, err := tx.WfInstance.WithContext(ctx).Where(tx.WfInstance.ID.Eq(processInstanceID)).Delete(); err != nil {
 			return fmt.Errorf("failed to delete instance: %w", err)
 		}
@@ -452,6 +483,14 @@ func (s *RuntimeServiceImpl) suspendProcessInstanceInternal(ctx context.Context,
 	// 幂等：已经是 Suspended
 	if instance.Status == string(enums.InstanceStatusSuspended) {
 		return nil
+	}
+
+	// 草稿不可挂起：挂起后再激活会跳过草稿激活闸（创建者校验、发起人范围重查、
+	// 引擎首驱），实例以 Active 状态存在却从未创建过任何任务，成为无人可见的僵尸。
+	// 草稿的生命周期动作是编辑、提交（激活）与删除。
+	if instance.Status == string(enums.InstanceStatusDraft) {
+		return fmt.Errorf("draft instance %s cannot be suspended; submit or delete it instead: %w",
+			processInstanceID, ErrValidation)
 	}
 
 	if currentUser := GetUserFromCtx(ctx); currentUser != nil {
@@ -1109,12 +1148,26 @@ func (s *RuntimeServiceImpl) CompleteProcessInstance(ctx context.Context, actor 
 func (s *RuntimeServiceImpl) ExecuteNext(ctx context.Context, processInstanceID, startNodeId string, variables map[string]interface{}) error {
 	release, reentrant := s.acquireExecGate(processInstanceID)
 	defer release()
-	// 等门闩期间实例可能已被先到的驱动完成（实例行已删除）：幂等返回 nil，
-	// 让并发审批的尾随 ExecuteNext 安静退出而不是报 instance not found。
-	// 同 goroutine 重入不重复查库（外层驱动刚查过状态）。
-	// 注意 Get 对不存在的行返回 (nil, nil)，真实 DB 错误须向上抛，
-	// 否则会把故障误判为"实例已完成"而静默吞掉。
 	if !reentrant {
+		// 跨副本互斥：execGate 只管本进程，副本间由 Locker 串行化（单机 LocalLock 无感）
+		if strictDistGate(ctx) {
+			// 救援类驱动（卡死重驱）严格取门闩：拿不到说明实例正被存活副本
+			// 驱动，让位返回错误，不与在途驱动并发
+			unlock, err := s.tryAcquireDistExecGate(ctx, processInstanceID)
+			if err != nil {
+				return fmt.Errorf("ExecuteNext %s: %w", processInstanceID, err)
+			}
+			if unlock != nil {
+				defer unlock()
+			}
+		} else if unlock := s.acquireDistExecGate(ctx, processInstanceID); unlock != nil {
+			defer unlock()
+		}
+		// 等门闩期间实例可能已被先到的驱动完成（实例行已删除）：幂等返回 nil，
+		// 让并发审批的尾随 ExecuteNext 安静退出而不是报 instance not found。
+		// 同 goroutine 重入不重复查库（外层驱动刚查过状态）。
+		// 注意 Get 对不存在的行返回 (nil, nil)，真实 DB 错误须向上抛，
+		// 否则会把故障误判为"实例已完成"而静默吞掉。
 		inst, err := s.instanceDAO.Get(ctx, processInstanceID)
 		if err != nil {
 			return err
@@ -1258,6 +1311,11 @@ func (s *RuntimeServiceImpl) ForceResumeInstance(ctx context.Context, actor Acto
 		return fmt.Errorf("process instance is in terminal status: %s", inst.Status)
 	}
 
+	// 与 RestoreProcessInstance 同一读-判-驱窗口，同样须与对端副本的驱动互斥
+	if unlock := s.acquireDistExecGate(ctx, processInstanceID); unlock != nil {
+		defer unlock()
+	}
+
 	e, err := s.GetExecution(ctx, inst.ProcessID)
 	if err != nil {
 		return err
@@ -1392,6 +1450,11 @@ func (s *RuntimeServiceImpl) RestoreProcessInstance(ctx context.Context, actor A
 	}
 	if err := ensureTenantAccess(ctx, "process instance", instance.TenantID); err != nil {
 		return err
+	}
+
+	// 恢复的读-判-驱窗口须与对端副本的驱动互斥，避免基于过期任务快照重复 restore
+	if unlock := s.acquireDistExecGate(ctx, processInstanceID); unlock != nil {
+		defer unlock()
 	}
 
 	// 2. 获取该实例的所有任务
@@ -1532,6 +1595,161 @@ func (s *RuntimeServiceImpl) GetStuckProcessInstances(ctx context.Context, tenan
 	return list, nil
 }
 
+// expiredDelayGracePeriod 超期判定的宽限期：过线未满宽限期的任务可能仍由
+// 在途计时器正常收尾，不视为计时器丢失。
+const expiredDelayGracePeriod = 60 * time.Second
+
+// GetExpiredDelayTasks 找出超期未完成的 delay 任务。
+//
+// delay 计时器活在驱动它的副本进程内，副本崩溃后任务行停在未终态；due_date
+// 早于当前时间减宽限期即视为计时器丢失。引擎建的 delay 行无办理人、初始即
+// Pending，Active/Pending 一并纳入。
+func (s *RuntimeServiceImpl) GetExpiredDelayTasks(ctx context.Context, tenantID string) ([]*model.WfTask, error) {
+	db := s.taskDAO.Query.WfTask.UnderlyingDB().WithContext(ctx)
+	q := db.Table("wf_task").
+		Where("task_type = ?", constants.TaskTypeDelay).
+		Where("status IN (?, ?)", string(enums.TaskStatusActive), string(enums.TaskStatusPending)).
+		Where("due_date IS NOT NULL AND due_date < ?", time.Now().Add(-expiredDelayGracePeriod))
+	if tenantID != "" {
+		q = q.Where("tenant_id = ?", tenantID)
+	}
+	var list []*model.WfTask
+	if err := q.Find(&list).Error; err != nil {
+		return nil, err
+	}
+	return list, nil
+}
+
+// RescueExpiredDelayTask 救援超期的 delay 任务。
+//
+// 与 RestoreProcessInstance 同款注入：metadata 携带既有任务的 task_id
+// （TaskCreator 见 task_id 跳过建行）与 _delayOffsetMs=now-CreatedAt，重入该
+// delay 节点。已超期则节点立即放行、完成既有任务行继续流转；未超期则按
+// "时长-偏移"重挂剩余计时器。经跨副本执行门闩与对端驱动互斥，拿到门闩后
+// 重读任务，已被在途计时器收尾的幂等返回 nil。
+func (s *RuntimeServiceImpl) RescueExpiredDelayTask(ctx context.Context, actor Actor, taskID string) error {
+	ctx = bindActor(ctx, actor)
+	if taskID == "" {
+		return fmt.Errorf("task ID cannot be empty")
+	}
+	task, err := s.taskDAO.Get(ctx, taskID)
+	if err != nil {
+		return fmt.Errorf("failed to get task: %w", err)
+	}
+	if task == nil {
+		return fmt.Errorf("%w: task %s", ErrNotFound, taskID)
+	}
+	if err := ensureTenantAccess(ctx, "task", task.TenantID); err != nil {
+		return err
+	}
+	if task.TaskType != constants.TaskTypeDelay {
+		return fmt.Errorf("task %s is %s, only delay tasks can be rescued", taskID, task.TaskType)
+	}
+	if !isDelayTaskWaiting(task.Status) {
+		return fmt.Errorf("delay task %s is %s, only waiting tasks can be rescued", taskID, task.Status)
+	}
+	if task.DueDate == nil {
+		return fmt.Errorf("delay task %s has no due date, cannot determine expiry", taskID)
+	}
+	if !task.DueDate.Before(time.Now().Add(-expiredDelayGracePeriod)) {
+		return fmt.Errorf("delay task %s is not expired yet (due at %s)", taskID, task.DueDate.Format(time.RFC3339))
+	}
+
+	instanceID := ""
+	if task.ProcessInstanceID != nil {
+		instanceID = *task.ProcessInstanceID
+	}
+	if instanceID == "" {
+		return fmt.Errorf("delay task %s has no process instance, cannot rescue", taskID)
+	}
+	instance, err := s.instanceDAO.Get(ctx, instanceID)
+	if err != nil {
+		return fmt.Errorf("failed to get process instance: %w", err)
+	}
+	if instance == nil {
+		return fmt.Errorf("%w: process instance %s", ErrInstanceNotFound, instanceID)
+	}
+	if instance.Status != string(enums.InstanceStatusActive) {
+		return fmt.Errorf("process instance %s is %s, only active instances can be rescued", instanceID, instance.Status)
+	}
+
+	// 判定与重驱须与对端副本的驱动互斥（同 RestoreProcessInstance），救援路径
+	// 走严格模式：拿不到门闩说明计时器所属副本可能仍在驱动，让位等下一拍
+	unlock, err := s.tryAcquireDistExecGate(ctx, instanceID)
+	if err != nil {
+		return fmt.Errorf("rescue delay task %s: %w", taskID, err)
+	}
+	if unlock != nil {
+		defer unlock()
+	}
+	// 等门闩期间任务可能已被在途计时器正常完成：重读确认仍是计时中状态
+	fresh, err := s.taskDAO.Get(ctx, taskID)
+	if err != nil {
+		return fmt.Errorf("failed to re-check task: %w", err)
+	}
+	if fresh == nil || !isDelayTaskWaiting(fresh.Status) {
+		logrus.WithField("taskId", taskID).
+			Info("delay task already settled while waiting for exec gate, skip rescue")
+		return nil
+	}
+
+	// 变量优先取任务变量，回退实例变量（同 RestoreProcessInstance）
+	var variablesStr string
+	if task.Variables != nil && *task.Variables != "" {
+		variablesStr = *task.Variables
+	} else if instance.Variables != nil {
+		variablesStr = *instance.Variables
+	} else {
+		variablesStr = "{}"
+	}
+	md := types.NewMetadata()
+	md.PutValue(constants.KeyTenantID, instance.TenantID)
+	md.PutValue(constants.KeyInstanceID, instance.ID)
+	if instance.BusinessKey != nil {
+		md.PutValue(constants.KeyBusinessKey, *instance.BusinessKey)
+	}
+	md.PutValue(constants.KeyOwner, instance.CreatedBy)
+	md.PutValue(constants.KeyProcessID, instance.ProcessID)
+	// 注入既有 task_id：重入节点时不重复建行，完成的是这条既有任务
+	md.PutValue(constants.KeyTaskID, task.ID)
+	// 已等待时长作为恢复偏移：超期则节点立即放行，未超期则重挂剩余计时
+	offsetMs := int64(0)
+	if !task.CreatedAt.IsZero() {
+		if offset := time.Since(task.CreatedAt).Milliseconds(); offset > 0 {
+			offsetMs = offset
+		}
+	}
+	md.PutValue(constants.KeyDelayOffsetMs, fmt.Sprintf("%d", offsetMs))
+	msg := types.NewMsg(0, "wf_delay_rescue", types.JSON, md, variablesStr)
+
+	logrus.WithFields(logrus.Fields{
+		"instanceId": instanceID,
+		"taskId":     taskID,
+		"node":       task.TaskDefKey,
+		"offsetMs":   offsetMs,
+	}).Warn("rescue expired delay task")
+
+	processDef, err := s.processDAO.Get(ctx, instance.ProcessID)
+	if err != nil {
+		return fmt.Errorf("failed to get process definition: %w", err)
+	}
+	if processDef == nil {
+		return fmt.Errorf("%w: process definition %s", ErrNotFound, instance.ProcessID)
+	}
+	engine, err := s.initExecution(processDef.TenantID, processDef.ID, processDef.DefinitionJSON)
+	if err != nil {
+		return err
+	}
+	engine.OnMsg(msg, types.WithRestoreNodes(restoreNodeRequest(task.TaskDefKey, msg)))
+	return nil
+}
+
+// isDelayTaskWaiting 判断 delay 任务是否处于计时中（未终态且未挂起）。
+// Suspended 的任务随实例挂起，救援须先恢复实例，不在本入口处理。
+func isDelayTaskWaiting(status string) bool {
+	return status == string(enums.TaskStatusActive) || status == string(enums.TaskStatusPending)
+}
+
 // ReDriveProcessInstance 重驱动卡死实例：从实例记录的当前节点重新执行引擎推进。
 //
 // 对"userTask 完成但流转未执行"的卡死态，等价于补跑缺失的那次 ExecuteNext：
@@ -1561,6 +1779,9 @@ func (s *RuntimeServiceImpl) ReDriveProcessInstance(ctx context.Context, actor A
 		"instance_id": processInstanceID,
 		"node":        node,
 	}).Warn("manual re-drive of possibly stuck instance")
+	// 严格门闩：拿不到说明实例正被存活副本驱动（如同步节点执行中），
+	// 让位返回 ErrExecGateBusy 由调用方择机重试
+	ctx = WithStrictDistGate(ctx)
 	return s.ExecuteNext(ctx, processInstanceID, node, nil)
 }
 
@@ -1925,7 +2146,9 @@ func (s *RuntimeServiceImpl) TerminateInTx(ctx context.Context, tx *query.Query,
 	// 与 CompleteProcessInstance 同口径用 int64 毫秒（int32 约 24.8 天溢出）
 	duration := now.Sub(instance.CreatedAt).Milliseconds()
 
-	// 终止所有未完结的任务
+	// 终止所有未完结的任务；同时收集这些任务的办理人——终止通知只发给
+	// 终止时尚有未决工作的办理人，已完成节点的历史审批人不再打扰。
+	liveAssignees := make([]string, 0, 4)
 	tasks, err := tx.WfTask.WithContext(ctx).Where(tx.WfTask.ProcessInstanceID.Eq(processInstanceID)).Find()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get tasks for termination: %w", err)
@@ -1935,6 +2158,9 @@ func (s *RuntimeServiceImpl) TerminateInTx(ctx context.Context, tx *query.Query,
 		if t.Status == string(enums.TaskStatusActive) ||
 			t.Status == string(enums.TaskStatusPending) ||
 			t.Status == string(enums.TaskStatusSuspended) {
+			if t.Assignee != nil && *t.Assignee != "" {
+				liveAssignees = append(liveAssignees, *t.Assignee)
+			}
 			if _, err := tx.WfTask.WithContext(ctx).Where(tx.WfTask.ID.Eq(t.ID)).Updates(map[string]interface{}{
 				tx.WfTask.Status.ColumnName().String():    enums.TaskStatusTerminated,
 				tx.WfTask.EndedAt.ColumnName().String():   &now,
@@ -2013,18 +2239,13 @@ func (s *RuntimeServiceImpl) TerminateInTx(ctx context.Context, tx *query.Query,
 	// 传事务 tx：走全局连接会与本事务互等死锁。
 	s.evictStaleChain(ctx, tx, instance.TenantID, instance.ProcessID)
 
-	// 构造 terminated 事件（通知发起人 + 当前审批人），交给调用方提交后派发
+	// 构造 terminated 事件（通知发起人 + 终止时的活跃办理人），交给调用方提交后派发
 	if s.workflowEngine.GetTaskEventListener() != nil {
 		toUsers := []string{}
 		if instance.StartUserID != "" {
 			toUsers = append(toUsers, instance.StartUserID)
 		}
-		// 查询当前活跃任务的 assignee
-		for _, t := range tasks {
-			if t.Assignee != nil && *t.Assignee != "" {
-				toUsers = append(toUsers, *t.Assignee)
-			}
-		}
+		toUsers = append(toUsers, liveAssignees...)
 		toUsers = uniqueStrings(toUsers)
 		if len(toUsers) > 0 {
 			// FromUser 取 ctx Actor；Source 区分 api/withdraw/reject 来源

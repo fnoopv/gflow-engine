@@ -269,7 +269,12 @@ func (s *TaskServiceImpl) Return(ctx context.Context, actor Actor, taskID, targe
 		return fmt.Errorf("%w: task", ErrNotFound)
 	}
 
-	// 设计器显式禁用 return → 拒绝（actionPermissions 解析失败时降级放行）
+	// 租户隔离：跨租户任务按 not found 隐藏，与 Withdraw/Claim 同口径，不泄露任务存在性。
+	if u := GetUserFromCtx(ctx); u != nil && task.TenantID != u.TenantID {
+		return fmt.Errorf("%w: task", ErrNotFound)
+	}
+
+	// 设计器显式禁用 return → 拒绝（actionPermissions 解析失败同样 fail-closed 拒绝）
 	if err := s.requireActionEnabled(ctx, task, "return"); err != nil {
 		return err
 	}

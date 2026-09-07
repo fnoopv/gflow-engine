@@ -10,13 +10,16 @@ import (
 	"fmt"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 
 	"github.com/rulego/gflow-engine/dao"
+	"github.com/rulego/gflow-engine/model"
 	"github.com/rulego/gflow-engine/query"
 	"github.com/rulego/gflow-engine/types/enums"
 	"github.com/rulego/rulego"
@@ -68,7 +71,8 @@ func newPoolTestRS(t *testing.T) (*RuntimeServiceImpl, *gorm.DB) {
 			current_activity TEXT, priority INTEGER NOT NULL DEFAULT 50, parent_id TEXT,
 			tenant_id TEXT NOT NULL, created_by TEXT NOT NULL,
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_by TEXT, updated_at DATETIME,
-			end_reason TEXT, duration INTEGER, ended_at DATETIME)`,
+			end_reason TEXT, duration INTEGER, ended_at DATETIME,
+			UNIQUE (tenant_id, business_key))`,
 	} {
 		if err := db.Exec(ddl).Error; err != nil {
 			t.Fatalf("create table: %v", err)
@@ -316,4 +320,83 @@ func TestInitExecution_MigratesLegacyRouteGateway(t *testing.T) {
 	if engine == nil {
 		t.Fatal("engine should not be nil")
 	}
+}
+
+// TestEnginePool_InvalidateExecutionCache: Update/Delete 就地改 definition_json 后，
+// InvalidateExecutionCache 必须驱逐注册表内所有服务实例的池条目（默认池+各租户池）
+// 并触发跨副本广播钩子；ApplyRemoteExecutionInvalidate 只清本地、不再广播（防循环）；
+// 驱逐后 GetExecution 按需自愈重装载。
+func TestEnginePool_InvalidateExecutionCache(t *testing.T) {
+	rs, db := newPoolTestRS(t)
+	// 测试直构的 rs 不经 NewRuntimeService，手动登记进失效注册表
+	runtimeServiceRegistry.Store(rs, struct{}{})
+	t.Cleanup(func() { runtimeServiceRegistry.Delete(rs) })
+	const tenant = "tenant-inval"
+	require := assert.New(t)
+
+	seedProcess(db, "proc-inval", "inval-key", 1, tenant, "chain-inval")
+	require.NoError(rs.PreloadChain(tenant, "proc-inval", poolTestChainDef("chain-inval")))
+	_, ok := rs.poolFor(tenant).Get("proc-inval")
+	require.True(ok, "预加载后应在租户池")
+
+	broadcast := make(chan string, 1)
+	oldHook := getEnginePoolHook()
+	SetEnginePoolInvalidateHook(func(processID string) { broadcast <- processID })
+	t.Cleanup(func() { SetEnginePoolInvalidateHook(oldHook) })
+
+	InvalidateExecutionCache("proc-inval")
+
+	_, ok = rs.poolFor(tenant).Get("proc-inval")
+	require.False(ok, "失效后应从租户池驱逐")
+	select {
+	case got := <-broadcast:
+		require.Equal("proc-inval", got)
+	default:
+		t.Fatal("InvalidateExecutionCache 应触发跨副本广播钩子")
+	}
+
+	// 自愈：驱逐后 GetExecution 慢路径从 DB 重装载最新定义
+	_, err := rs.GetExecution(context.Background(), "proc-inval")
+	require.NoError(err)
+	_, ok = rs.poolFor(tenant).Get("proc-inval")
+	require.True(ok, "驱逐后 GetExecution 应自愈重装载")
+
+	// 远程失效路径：只清本地、不触发钩子
+	ApplyRemoteExecutionInvalidate("proc-inval")
+	_, ok = rs.poolFor(tenant).Get("proc-inval")
+	require.False(ok)
+	select {
+	case got := <-broadcast:
+		t.Fatalf("ApplyRemoteExecutionInvalidate 不应再广播，却收到 %q", got)
+	default:
+	}
+}
+
+// RecentlyUpdatedProcessIDs 只返回 updated_at 晚于 since 的定义：
+// 失效兜底巡检按时间窗扫近期变更，窗口外的不得进入结果。
+func TestRecentlyUpdatedProcessIDs(t *testing.T) {
+	q := newDelayRescueTestDB(t)
+	now := time.Now()
+	stale := now.Add(-time.Hour)
+
+	fresh := &model.WfProcess{ID: "proc-fresh", ProcessKey: "k1", Name: "n", Version: 1,
+		DefinitionJSON: "{}", Status: "active", TenantID: "t1", CreatedAt: now, UpdatedAt: &now}
+	old := &model.WfProcess{ID: "proc-old", ProcessKey: "k2", Name: "n", Version: 1,
+		DefinitionJSON: "{}", Status: "active", TenantID: "t1", CreatedAt: stale, UpdatedAt: &stale}
+	ctx := context.Background()
+	d := dao.NewProcessDAOWithQuery(q)
+	require.NoError(t, d.Create(ctx, fresh))
+	require.NoError(t, d.Create(ctx, old))
+
+	rs := &RuntimeServiceImpl{processDAO: d}
+	runtimeServiceRegistry.Store(rs, struct{}{})
+	t.Cleanup(func() { runtimeServiceRegistry.Delete(rs) })
+
+	ids, err := RecentlyUpdatedProcessIDs(ctx, now.Add(-time.Minute))
+	require.NoError(t, err)
+	require.Equal(t, []string{"proc-fresh"}, ids)
+
+	ids, err = RecentlyUpdatedProcessIDs(ctx, now.Add(-2*time.Hour))
+	require.NoError(t, err)
+	require.Len(t, ids, 2)
 }
