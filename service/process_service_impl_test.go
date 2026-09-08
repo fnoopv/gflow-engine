@@ -156,13 +156,13 @@ func TestProcessServiceImpl_Update_EmptyID(t *testing.T) {
 func TestProcessServiceImpl_Update_NilDAO_Panics(t *testing.T) {
 	s := &ProcessServiceImpl{}
 	expectPanic(t, "Update", func() {
-		s.Update(context.Background(), Actor{UserID: "tester", TenantID: "t1"}, &model.WfProcess{ID: "proc-1", Name: "Test"})
+		s.Update(context.Background(), Actor{UserID: "tester", TenantID: "t1", SuperAdmin: true}, &model.WfProcess{ID: "proc-1", Name: "Test"})
 	})
 }
 
 func TestProcessServiceImpl_Activate_EmptyID(t *testing.T) {
 	s := newProcessServiceImplForTest()
-	_, err := s.Activate(context.Background(), Actor{UserID: "tester", TenantID: "tenant1"}, "")
+	_, err := s.Activate(context.Background(), Actor{UserID: "tester", TenantID: "tenant1", SuperAdmin: true}, "")
 	if err == nil {
 		t.Error("expected error for empty processID")
 	}
@@ -185,29 +185,59 @@ func TestProcessServiceImpl_List_NilDAO_Panics(t *testing.T) {
 func TestProcessServiceImpl_Delete_NilInstanceDAO_Panics(t *testing.T) {
 	s := &ProcessServiceImpl{}
 	expectPanic(t, "Delete", func() {
-		s.Delete(context.Background(), Actor{UserID: "tester", TenantID: "t1"}, "proc-1")
+		s.Delete(context.Background(), Actor{UserID: "tester", TenantID: "t1", SuperAdmin: true}, "proc-1")
 	})
 }
 
 func TestProcessServiceImpl_UpdateStatus_NilDAO_Panics(t *testing.T) {
 	s := &ProcessServiceImpl{}
 	expectPanic(t, "UpdateStatus", func() {
-		s.UpdateStatus(context.Background(), Actor{UserID: "tester", TenantID: "t1"}, "proc-1", "active")
+		s.UpdateStatus(context.Background(), Actor{UserID: "tester", TenantID: "t1", SuperAdmin: true}, "proc-1", "active")
 	})
 }
 
 func TestProcessServiceImpl_UpdateStatusByKey_NilDAO_Panics(t *testing.T) {
 	s := &ProcessServiceImpl{}
 	expectPanic(t, "UpdateStatusByKey", func() {
-		s.UpdateStatusByKey(context.Background(), Actor{UserID: "tester", TenantID: "t1"}, "key1", "active")
+		s.UpdateStatusByKey(context.Background(), Actor{UserID: "tester", TenantID: "t1", SuperAdmin: true}, "key1", "active")
 	})
 }
 
 func TestProcessServiceImpl_Retire_NilDAO_Panics(t *testing.T) {
 	s := &ProcessServiceImpl{}
 	expectPanic(t, "Retire", func() {
-		s.Retire(context.Background(), Actor{UserID: "tester", TenantID: "t1"}, "proc-1")
+		s.Retire(context.Background(), Actor{UserID: "tester", TenantID: "t1", SuperAdmin: true}, "proc-1")
 	})
+}
+
+// 流程定义变更类操作（改/删/停用/激活/状态变更）须管理员或系统身份，
+// 同租户普通用户一律拒绝（fail-closed）。用 nil DAO 验证：非管理员在触达 DAO 前即被拒，
+// 不会走进 nil 指针路径。
+func TestProcessServiceImpl_DefinitionMutations_RequireAdmin(t *testing.T) {
+	s := &ProcessServiceImpl{}
+	nonAdmin := Actor{UserID: "eve", TenantID: "t1"}
+	cases := []struct {
+		name string
+		fn   func() error
+	}{
+		{"Update", func() error { return s.Update(context.Background(), nonAdmin, &model.WfProcess{ID: "p", Name: "n"}) }},
+		{"Delete", func() error { return s.Delete(context.Background(), nonAdmin, "proc-1") }},
+		{"Retire", func() error { return s.Retire(context.Background(), nonAdmin, "proc-1") }},
+		{"Activate", func() error { _, err := s.Activate(context.Background(), nonAdmin, "proc-1"); return err }},
+		{"UpdateStatus", func() error { return s.UpdateStatus(context.Background(), nonAdmin, "proc-1", "active") }},
+		{"UpdateStatusByKey", func() error { return s.UpdateStatusByKey(context.Background(), nonAdmin, "key1", "active") }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.fn()
+			if err == nil {
+				t.Fatalf("%s: expected error for non-admin operator", tc.name)
+			}
+			if !errors.Is(err, ErrPermissionDenied) {
+				t.Fatalf("%s: expected ErrPermissionDenied, got %v", tc.name, err)
+			}
+		})
+	}
 }
 
 func TestNewProcessService_NilEngine(t *testing.T) {

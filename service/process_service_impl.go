@@ -60,6 +60,10 @@ func (s *ProcessServiceImpl) Update(ctx context.Context, actor Actor, process *m
 	if process.ID == "" {
 		return fmt.Errorf("process ID cannot be empty")
 	}
+	// 管理员门槛：修改流程定义（DSL/版本递增）影响后续发起，仅管理员或系统身份可操作。
+	if err := requireAdminIdentity(&actor); err != nil {
+		return err
+	}
 
 	// 1. 获取现有流程定义以检查权限
 	existingProcess, err := s.processDAO.Get(ctx, process.ID)
@@ -353,6 +357,10 @@ func (s *ProcessServiceImpl) Delete(ctx context.Context, actor Actor, processID 
 	if processID == "" {
 		return fmt.Errorf("process definition ID cannot be empty")
 	}
+	// 管理员门槛：删除流程定义属租户级管理操作，仅管理员或系统身份可操作。
+	if err := requireAdminIdentity(&actor); err != nil {
+		return err
+	}
 
 	// Get 内含租户归属校验：跨租户按 NotFound 返回，也避免下方运行实例检查
 	// （按 processID 全表查）对异租户 ID 泄露存在性。
@@ -392,6 +400,10 @@ func (s *ProcessServiceImpl) Retire(ctx context.Context, actor Actor, processID 
 // Activate 激活流程定义，并创建新的版本
 func (s *ProcessServiceImpl) Activate(ctx context.Context, actor Actor, processID string) (*model.WfProcess, error) {
 	ctx = bindActor(ctx, actor)
+	// 管理员门槛：激活流程定义（生成新 active 版本）仅管理员或系统身份可操作。
+	if err := requireAdminIdentity(&actor); err != nil {
+		return nil, err
+	}
 	process, err := s.Get(ctx, processID)
 	if err != nil {
 		return nil, err
@@ -404,6 +416,10 @@ func (s *ProcessServiceImpl) UpdateStatus(ctx context.Context, actor Actor, proc
 	ctx = bindActor(ctx, actor)
 	if processID == "" {
 		return fmt.Errorf("process ID cannot be empty")
+	}
+	// 管理员门槛：变更流程定义状态仅管理员或系统身份可操作。
+	if err := requireAdminIdentity(&actor); err != nil {
+		return err
 	}
 
 	process, err := s.processDAO.Get(ctx, processID)
@@ -427,6 +443,10 @@ func (s *ProcessServiceImpl) UpdateStatusByKey(ctx context.Context, actor Actor,
 	tenantID := actor.TenantID
 	if processKey == "" {
 		return fmt.Errorf("process key cannot be empty")
+	}
+	// 管理员门槛：按 key 变更流程定义状态仅管理员或系统身份可操作。
+	if err := requireAdminIdentity(&actor); err != nil {
+		return err
 	}
 
 	process, err := s.processDAO.GetLatestByKey(ctx, tenantID, processKey)
