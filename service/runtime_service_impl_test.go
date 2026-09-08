@@ -414,7 +414,7 @@ func TestSetProcessInstanceVariables_ConcurrentMerge(t *testing.T) {
 			// FOR UPDATE 排队等待），重试模拟排队语义
 			var err error
 			for attempt := 0; attempt < 8; attempt++ {
-				err = svc.SetProcessInstanceVariables(ctx, Actor{UserID: "sys", TenantID: "t1"}, "inst-vars", map[string]interface{}{key: i})
+				err = svc.SetProcessInstanceVariables(ctx, Actor{UserID: "starter", TenantID: "t1"}, "inst-vars", map[string]interface{}{key: i})
 				if err == nil {
 					return
 				}
@@ -432,6 +432,35 @@ func TestSetProcessInstanceVariables_ConcurrentMerge(t *testing.T) {
 	got, err := svc.GetProcessInstanceVariables(ctx, ActorFromCtx(ctx), "inst-vars")
 	require.NoError(t, err)
 	require.Len(t, got, n, "并发批量写入不应互相覆盖")
+}
+
+// 实例变量写入的属主校验：同租户非发起人被拒（横向越权防护），发起人/管理员放行。
+func TestSetProcessInstanceVariables_OwnerAuthorized(t *testing.T) {
+	q := rtImplTestDB(t)
+	instDAO := dao.NewInstanceDAOWithQuery(q)
+	svc := &RuntimeServiceImpl{instanceDAO: instDAO}
+	ctx := context.Background()
+
+	require.NoError(t, instDAO.Create(ctx, &model.WfInstance{
+		ID: "inst-owner", ProcessID: "proc-1", Name: "owner", Status: string(enums.InstanceStatusActive),
+		TenantID: "t1", CreatedBy: "starter", StartUserID: "starter", CreatedAt: time.Now(),
+	}))
+
+	// 同租户非发起人 → 拒绝
+	err := svc.SetProcessInstanceVariables(ctx, Actor{UserID: "eve", TenantID: "t1"}, "inst-owner", map[string]interface{}{"k": "v"})
+	require.ErrorIs(t, err, ErrPermissionDenied)
+
+	// 发起人 → 放行
+	require.NoError(t, svc.SetProcessInstanceVariables(ctx, Actor{UserID: "starter", TenantID: "t1"}, "inst-owner", map[string]interface{}{"k": "v"}))
+
+	// 管理员 → 放行（单变量版）
+	require.NoError(t, svc.SetProcessInstanceVariable(ctx, Actor{UserID: "admin", TenantID: "t1", SuperAdmin: true}, "inst-owner", "k2", "v2"))
+
+	// 单变量删除：同租户非发起人 → 拒绝
+	require.ErrorIs(t, svc.RemoveProcessInstanceVariable(ctx, Actor{UserID: "eve", TenantID: "t1"}, "inst-owner", "k"), ErrPermissionDenied)
+
+	// 发起人删除 → 放行
+	require.NoError(t, svc.RemoveProcessInstanceVariable(ctx, Actor{UserID: "starter", TenantID: "t1"}, "inst-owner", "k"))
 }
 
 // ---------------------------------------------------------------------------

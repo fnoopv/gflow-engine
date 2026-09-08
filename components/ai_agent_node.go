@@ -829,7 +829,7 @@ func (n *AIAgentNode) persistOutputForReuse(ctx types.RuleContext, msg types.Rul
 		return
 	}
 	if err := n.RuntimeService.SetProcessInstanceVariable(
-		ctx.GetContext(), actorFromCtxOrMeta(ctx, msg), instanceID, n.aiOutputVarKey(), string(buf)); err != nil {
+		service.WithInternalCallingMode(ctx.GetContext()), actorFromCtxOrMeta(ctx, msg), instanceID, n.aiOutputVarKey(), string(buf)); err != nil {
 		logrus.WithError(err).Warnf("AIAgentNode %s: persist output for reuse failed", n.GetSelfId())
 	}
 }

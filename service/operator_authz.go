@@ -7,14 +7,15 @@ import (
 	"github.com/rulego/gflow-engine/model"
 )
 
-// requireInstanceOwnerAuthorized 校验流程实例级生命周期变更（终止/挂起/删除/激活/重启/
-// 强恢复/重驱动/救援）的属主/管理员权限。放行三类：实例发起人自己、管理员
-// （SuperAdmin）、系统身份；其余（含无操作人）一律拒绝（fail-closed）。
+// requireInstanceOwnerAuthorized 校验流程实例级变更（生命周期：终止/挂起/删除/激活/重启/
+// 强恢复/重驱动/救援；实例变量写入：SetProcessInstanceVariables 等）的属主/管理员权限。
+// 放行三类：实例发起人自己、管理员（SuperAdmin）、系统身份；其余（含无操作人）一律拒绝。
 //
 // 引擎内部级联（CallingModeInternal，如失败终止 handleProcessInstanceFailure、驳回
-// 级联终止 terminateInstance）携带的是"参与该实例的真实用户"而非发起人，属流程语义
-// 驱动的副作用，不套用属主规则——这些调用方已显式以 WithInternalCallingMode 标记 ctx，
-// 本方法对其跳过，与 ensureTenantAccess（租户仍照常校验）互不干扰。
+// 级联终止 terminateInstance、AI 节点输出缓存持久化）携带的是"参与该实例的真实用户"
+// 而非发起人，属流程语义驱动的副作用，不套用属主规则——这些调用方已显式以
+// WithInternalCallingMode 标记 ctx，本方法对其跳过，与 ensureTenantAccess（租户仍照常
+// 校验）互不干扰。
 func requireInstanceOwnerAuthorized(ctx context.Context, instance *model.WfInstance) error {
 	if GetCallingMode(ctx) == CallingModeInternal {
 		return nil
