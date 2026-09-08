@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/rulego/gflow-engine/model"
@@ -161,4 +162,37 @@ func TestValidateExpressions(t *testing.T) {
 	if errs := ValidateExpressions([]string{"true"}); len(errs) != 0 {
 		t.Errorf("valid expression should pass: %v", errs)
 	}
+}
+
+// TestServiceFunctionChecker_ConcurrentAccess 验证校验器读写并发安全：
+// 宿主装配（SetServiceFunctionChecker）与 Deploy/Update 请求路径的读取
+// validateServiceTaskFunction 可能并发，须经 RWMutex 保护；在 go test -race
+// 下可捕获漏同步，普通运行下仅演练读写路径。
+func TestServiceFunctionChecker_ConcurrentAccess(t *testing.T) {
+	defer SetServiceFunctionChecker(nil)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 200; j++ {
+				SetServiceFunctionChecker(func(name string) bool { return name == "serialNo" })
+				if fn := serviceFunctionCheckerForRead(); fn == nil {
+					t.Errorf("checker should be set during write phase")
+					return
+				}
+			}
+		}()
+	}
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 200; j++ {
+				_ = serviceFunctionCheckerForRead()
+			}
+		}()
+	}
+	wg.Wait()
 }

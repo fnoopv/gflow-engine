@@ -3,6 +3,7 @@ package service
 import (
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/rulego/gflow-engine/types/constants"
 	"github.com/rulego/rulego/api/types"
@@ -33,11 +34,25 @@ type ConditionIssue struct {
 // serviceFunctionChecker serviceTask 函数名存在性校验器，由组件层
 // （components.Services 所在包）经 SetServiceFunctionChecker 注入，避免
 // service→components 循环依赖。nil 时跳过函数名校验（宿主未完成装配的场景）。
-var serviceFunctionChecker func(name string) bool
+// 读侧在 Deploy/Update 请求处理路径（ValidateChainExpressions）并发执行，
+// 写侧在宿主装配（components.Register）时注入，故须加锁避免并发读写竞态。
+var (
+	serviceFunctionChecker   func(name string) bool
+	serviceFunctionCheckerMu sync.RWMutex
+)
 
-// SetServiceFunctionChecker 注入 serviceTask 函数名校验器；传 nil 恢复跳过。
+// SetServiceFunctionChecker 注入 serviceTask 函数名校验器；传 nil 恢复跳过。并发安全。
 func SetServiceFunctionChecker(fn func(name string) bool) {
+	serviceFunctionCheckerMu.Lock()
+	defer serviceFunctionCheckerMu.Unlock()
 	serviceFunctionChecker = fn
+}
+
+// serviceFunctionCheckerForRead 并发安全地读取当前校验器（读锁）。
+func serviceFunctionCheckerForRead() func(name string) bool {
+	serviceFunctionCheckerMu.RLock()
+	defer serviceFunctionCheckerMu.RUnlock()
+	return serviceFunctionChecker
 }
 
 // ValidateChainExpressions 校验链内所有分支条件表达式可编译、serviceTask
@@ -107,7 +122,7 @@ func validateServiceTaskFunction(node *types.RuleNode, cfg map[string]interface{
 		issue.Error = "functionName is empty"
 		return []ConditionIssue{issue}
 	}
-	if serviceFunctionChecker != nil && !serviceFunctionChecker(name) {
+	if checker := serviceFunctionCheckerForRead(); checker != nil && !checker(name) {
 		issue.Error = "function is not registered"
 		return []ConditionIssue{issue}
 	}
