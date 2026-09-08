@@ -822,6 +822,11 @@ func (s *RuntimeServiceImpl) SetProcessInstanceVariables(ctx context.Context, ac
 	if err := ensureTenantAccess(ctx, "process instance", instance.TenantID); err != nil {
 		return err
 	}
+	// 属主校验：实例变量写入与生命周期级变更同口径（发起人/管理员/系统），
+	// 防止同租户横向越权改写他人实例变量；引擎内部级联经 CallingModeInternal 跳过。
+	if err := requireInstanceOwnerAuthorized(ctx, instance); err != nil {
+		return err
+	}
 
 	return WithInstanceTx(ctx, s.instanceDAO.Query, processInstanceID, func(scope *InstanceScope) error {
 		tx := scope.Tx()
@@ -886,6 +891,10 @@ func (s *RuntimeServiceImpl) getProcessInstanceVariablesInTx(ctx context.Context
 		return nil, fmt.Errorf("failed to get process instance: %w", err)
 	}
 	if err := ensureTenantAccess(ctx, "process instance", instance.TenantID); err != nil {
+		return nil, err
+	}
+	// 属主校验（锁内重读）：与入口处同口径，防并发窗口内越权写变量。
+	if err := requireInstanceOwnerAuthorized(ctx, instance); err != nil {
 		return nil, err
 	}
 	return ParseVariablesJSON(instance.Variables)
