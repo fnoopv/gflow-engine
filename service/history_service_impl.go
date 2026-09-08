@@ -229,6 +229,11 @@ func (s *HistoryServiceImpl) DeleteHistoricProcessInstance(ctx context.Context, 
 	if err := ensureTenantAccess(ctx, "historic process instance", record.TenantID); err != nil {
 		return err
 	}
+	// 属主校验：归档删除与在办实例生命周期同口径（发起人/管理员/系统），
+	// 防止同租户横向越权删除他人归档记录。
+	if err := requireInstanceOwnerAuthorized(ctx, record); err != nil {
+		return err
+	}
 
 	if err := s.hiInstanceDAO.Delete(ctx, processInstanceID); err != nil {
 		return fmt.Errorf("failed to delete historic process instance: %w", err)
@@ -253,6 +258,11 @@ func (s *HistoryServiceImpl) DeleteHistoricTaskInstance(ctx context.Context, act
 		return fmt.Errorf("%w: historic task instance", ErrNotFound)
 	}
 	if err := ensureTenantAccess(ctx, "historic task instance", record.TenantID); err != nil {
+		return err
+	}
+	// 办理人校验：归档任务删除与在办任务操作同口径（assignee/管理员/系统），
+	// 防止同租户横向越权删除他人历史任务记录。
+	if err := requireTaskOperatorAuthorized(ctx, record); err != nil {
 		return err
 	}
 
