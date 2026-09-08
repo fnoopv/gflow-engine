@@ -44,6 +44,9 @@ func NewHistoryServiceWithQuery(q *query.Query) HistoryService {
 // GetHistoricProcessInstances 获取历史流程实例列表
 func (s *HistoryServiceImpl) GetHistoricProcessInstances(ctx context.Context, actor Actor, query *HistoricProcessInstanceQuery) ([]*HistoricProcessInstance, int64, error) {
 	ctx = bindActor(ctx, actor)
+	if err := requireNonEmptyTenantForRealUser(&actor); err != nil {
+		return nil, 0, err
+	}
 	if query == nil {
 		query = &HistoricProcessInstanceQuery{}
 	}
@@ -86,11 +89,8 @@ func (s *HistoryServiceImpl) GetHistoricProcessInstances(ctx context.Context, ac
 		}
 	}
 
-	instanceQuery.TenantID = query.TenantID
-	// 强制以 actor 租户为查询范围；空租户视为系统视角，不做租户过滤
-	if u := GetUserFromCtx(ctx); u != nil && u.TenantID != "" {
-		instanceQuery.TenantID = u.TenantID
-	}
+	// 强制以 actor 租户为查询范围：系统身份空租户＝平台级扫描，非系统空租户 fail-closed。
+	instanceQuery.TenantID = actor.TenantID
 	instances, total, err := s.hiInstanceDAO.List(ctx, instanceQuery)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to query historic process instances: %w", err)
@@ -137,6 +137,9 @@ func (s *HistoryServiceImpl) GetHistoricProcessInstance(ctx context.Context, act
 // GetHistoricTaskInstances 获取历史任务实例列表
 func (s *HistoryServiceImpl) GetHistoricTaskInstances(ctx context.Context, actor Actor, query *HistoricTaskInstanceQuery) ([]*HistoricTaskInstance, int64, error) {
 	ctx = bindActor(ctx, actor)
+	if err := requireNonEmptyTenantForRealUser(&actor); err != nil {
+		return nil, 0, err
+	}
 	if query == nil {
 		query = &HistoricTaskInstanceQuery{}
 	}
@@ -156,7 +159,7 @@ func (s *HistoryServiceImpl) GetHistoricTaskInstances(ctx context.Context, actor
 		Name:        query.TaskName,
 		Assignee:    query.TaskAssignee,
 		Owner:       query.TaskOwner,
-		TenantID:    query.TenantID,
+		TenantID:    actor.TenantID,
 		// 完成时间窗 → EndedAfter/Before；创建时间窗 → CreatedAfter/Before
 		EndedAfter:    query.TaskCompletedAfter,
 		EndedBefore:   query.TaskCompletedBefore,
@@ -168,11 +171,6 @@ func (s *HistoryServiceImpl) GetHistoricTaskInstances(ctx context.Context, actor
 			OrderBy:   query.OrderBy,
 			OrderDesc: strings.EqualFold(query.SortOrder, "desc"),
 		},
-	}
-
-	// 强制以 actor 租户为查询范围；空租户视为系统视角，不做租户过滤
-	if u := GetUserFromCtx(ctx); u != nil && u.TenantID != "" {
-		taskQuery.TenantID = u.TenantID
 	}
 
 	// 查询任务

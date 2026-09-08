@@ -94,8 +94,8 @@ type TaskService interface {
 	// GetTaskByDefKey 按实例+节点定义Key取当前任务（同 key 多行时取第一条）
 	GetTaskByDefKey(ctx context.Context, processInstanceID, taskDefKey string) (*model.WfTask, error)
 
-	// GetTaskCandidates 获取任务候选人
-	GetTaskCandidates(ctx context.Context, processInstanceID, taskDefKey string) ([]*dto.NodeApproverDTO, error)
+	// GetTaskCandidates 获取任务候选人（actor 含租户时做任务归属校验，跨租户拒绝）
+	GetTaskCandidates(ctx context.Context, actor Actor, processInstanceID, taskDefKey string) ([]*dto.NodeApproverDTO, error)
 
 	// AddCandidates 批量写入任务候选人（存原始角色/部门/person 引用，查询时展开）。
 	// 每条 entityID 一条 wf_task_assignee 记录。
@@ -209,14 +209,14 @@ type TaskService interface {
 
 	// ========== 节点审批人管理 ==========
 
-	// GetNodeApprovalStatus 获取节点审批状态信息
-	GetNodeApprovalStatus(ctx context.Context, taskID string) (*dto.NodeApprovalStatusDTO, error)
+	// GetNodeApprovalStatus 获取节点审批状态信息（actor 含租户时做任务归属校验，跨租户拒绝）
+	GetNodeApprovalStatus(ctx context.Context, actor Actor, taskID string) (*dto.NodeApprovalStatusDTO, error)
 
 	// GetNodeApprovers 获取节点审批人列表
-	GetNodeApprovers(ctx context.Context, taskID string) ([]*dto.NodeApproverDTO, error)
+	GetNodeApprovers(ctx context.Context, actor Actor, taskID string) ([]*dto.NodeApproverDTO, error)
 
 	// GetNodeApprovalStatusByProcessInstance 根据流程实例和任务定义Key获取节点审批状态
-	GetNodeApprovalStatusByProcessInstance(ctx context.Context, processInstanceID, taskDefKey string) (*dto.NodeApprovalStatusDTO, error)
+	GetNodeApprovalStatusByProcessInstance(ctx context.Context, actor Actor, processInstanceID, taskDefKey string) (*dto.NodeApprovalStatusDTO, error)
 }
 
 // TaskServiceInternal 引擎内部机制使用的任务服务接口，宿主不应调用。

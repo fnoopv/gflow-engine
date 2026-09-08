@@ -307,7 +307,7 @@ func TestTaskServiceImpl_GetApprovalStatisticsDetail_EmptyUserID(t *testing.T) {
 
 func TestTaskServiceImpl_GetNodeApprovalStatus_EmptyTaskID(t *testing.T) {
 	s := newTaskServiceImplForTest()
-	_, err := s.GetNodeApprovalStatus(context.Background(), "")
+	_, err := s.GetNodeApprovalStatus(context.Background(), Actor{TenantID: "t1"}, "")
 	if err == nil {
 		t.Error("expected error for empty taskID")
 	}
@@ -315,7 +315,7 @@ func TestTaskServiceImpl_GetNodeApprovalStatus_EmptyTaskID(t *testing.T) {
 
 func TestTaskServiceImpl_GetNodeApprovers_EmptyTaskID(t *testing.T) {
 	s := newTaskServiceImplForTest()
-	_, err := s.GetNodeApprovers(context.Background(), "")
+	_, err := s.GetNodeApprovers(context.Background(), Actor{TenantID: "t1"}, "")
 	if err == nil {
 		t.Error("expected error for empty taskID")
 	}
@@ -323,7 +323,7 @@ func TestTaskServiceImpl_GetNodeApprovers_EmptyTaskID(t *testing.T) {
 
 func TestTaskServiceImpl_GetNodeApprovalStatusByProcessInstance_EmptyID(t *testing.T) {
 	s := newTaskServiceImplForTest()
-	_, err := s.GetNodeApprovalStatusByProcessInstance(context.Background(), "", "key1")
+	_, err := s.GetNodeApprovalStatusByProcessInstance(context.Background(), Actor{TenantID: "t1"}, "", "key1")
 	if err == nil {
 		t.Error("expected error for empty processInstanceID")
 	}
@@ -331,7 +331,7 @@ func TestTaskServiceImpl_GetNodeApprovalStatusByProcessInstance_EmptyID(t *testi
 
 func TestTaskServiceImpl_GetNodeApprovalStatusByProcessInstance_EmptyKey(t *testing.T) {
 	s := newTaskServiceImplForTest()
-	_, err := s.GetNodeApprovalStatusByProcessInstance(context.Background(), "inst1", "")
+	_, err := s.GetNodeApprovalStatusByProcessInstance(context.Background(), Actor{TenantID: "t1"}, "inst1", "")
 	if err == nil {
 		t.Error("expected error for empty taskDefKey")
 	}
@@ -466,7 +466,7 @@ func TestGetHistoryTask_EmptyID(t *testing.T) {
 
 func TestGetTaskCandidates_EmptyDefKey(t *testing.T) {
 	s := newTaskServiceForValidation()
-	_, err := s.GetTaskCandidates(context.Background(), "inst1", "")
+	_, err := s.GetTaskCandidates(context.Background(), Actor{TenantID: "t1"}, "inst1", "")
 	if err == nil {
 		t.Error("expected error for empty taskDefKey")
 	}
@@ -474,7 +474,7 @@ func TestGetTaskCandidates_EmptyDefKey(t *testing.T) {
 
 func TestGetTaskCandidates_EmptyInstanceID(t *testing.T) {
 	s := newTaskServiceForValidation()
-	_, err := s.GetTaskCandidates(context.Background(), "", "key1")
+	_, err := s.GetTaskCandidates(context.Background(), Actor{TenantID: "t1"}, "", "key1")
 	if err == nil {
 		t.Error("expected error for empty processInstanceID")
 	}
@@ -658,7 +658,7 @@ func TestReturn_EmptyUserID(t *testing.T) {
 
 func TestGetNodeApprovalStatus_EmptyID(t *testing.T) {
 	s := newTaskServiceForValidation()
-	_, err := s.GetNodeApprovalStatus(context.Background(), "")
+	_, err := s.GetNodeApprovalStatus(context.Background(), Actor{TenantID: "t1"}, "")
 	if err == nil {
 		t.Error("expected error for empty taskID")
 	}
@@ -666,7 +666,7 @@ func TestGetNodeApprovalStatus_EmptyID(t *testing.T) {
 
 func TestGetNodeApprovalStatusByProcessInstance_EmptyInstanceID(t *testing.T) {
 	s := newTaskServiceForValidation()
-	_, err := s.GetNodeApprovalStatusByProcessInstance(context.Background(), "", "key1")
+	_, err := s.GetNodeApprovalStatusByProcessInstance(context.Background(), Actor{TenantID: "t1"}, "", "key1")
 	if err == nil {
 		t.Error("expected error for empty processInstanceID")
 	}
@@ -674,7 +674,7 @@ func TestGetNodeApprovalStatusByProcessInstance_EmptyInstanceID(t *testing.T) {
 
 func TestGetNodeApprovalStatusByProcessInstance_EmptyDefKey(t *testing.T) {
 	s := newTaskServiceForValidation()
-	_, err := s.GetNodeApprovalStatusByProcessInstance(context.Background(), "inst1", "")
+	_, err := s.GetNodeApprovalStatusByProcessInstance(context.Background(), Actor{TenantID: "t1"}, "inst1", "")
 	if err == nil {
 		t.Error("expected error for empty taskDefKey")
 	}
