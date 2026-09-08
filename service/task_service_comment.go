@@ -37,6 +37,11 @@ func (s *TaskServiceImpl) AddTaskComment(ctx context.Context, actor Actor, taskI
 	if u != nil && task.TenantID != u.TenantID {
 		return "", fmt.Errorf("%w: task", ErrNotFound)
 	}
+	// 办理人校验：评论文本同样须任务办理人（assignee）或管理员/系统身份，
+	// 防止同租户任意用户给他人任务灌入审批意见（横向越权）。与任务属性变更同口径。
+	if err := requireTaskOperatorAuthorized(ctx, task); err != nil {
+		return "", err
+	}
 
 	userName := ""
 	if u != nil && u.UserID == userID {

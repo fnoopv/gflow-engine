@@ -71,7 +71,7 @@ func TestTaskComments_Roundtrip(t *testing.T) {
 	require.NoError(t, svc.taskDAO.Create(ctx, &model.WfTask{
 		ID: "task-c1", Status: string(enums.TaskStatusActive), TenantID: "t1",
 		ProcessInstanceID: secFixStrPtr("inst-c1"), Name: "审批", TaskType: "user_task",
-		CreatedAt: now, CreatedBy: "sys",
+		Assignee: secFixStrPtr("userA"), CreatedAt: now, CreatedBy: "sys",
 	}))
 	id1, err := svc.AddTaskComment(ctx, Actor{UserID: "userA", UserName: "张三", TenantID: "t1"}, "task-c1", "同意")
 	require.NoError(t, err)
@@ -81,7 +81,7 @@ func TestTaskComments_Roundtrip(t *testing.T) {
 	require.NoError(t, svc.hiTaskDAO.Create(ctx, &model.WfHiTask{
 		ID: "task-c2", Status: string(enums.TaskStatusCompleted), TenantID: "t1",
 		ProcessInstanceID: secFixStrPtr("inst-c2"), Name: "审批", TaskType: "user_task",
-		CreatedAt: now, CreatedBy: "sys",
+		Assignee: secFixStrPtr("userA"), CreatedAt: now, CreatedBy: "sys",
 	}))
 	_, err = svc.AddTaskComment(ctx, Actor{UserID: "userA", UserName: "张三", TenantID: "t1"}, "task-c2", "补充意见")
 	require.NoError(t, err, "归档任务应可评论")
@@ -113,4 +113,30 @@ func TestTaskComments_Roundtrip(t *testing.T) {
 	// 不存在的任务
 	_, err = svc.GetTaskComments(ctx, ActorFromCtx(ctx), "task-ghost")
 	require.ErrorIs(t, err, ErrNotFound)
+}
+
+// 评论文本写路径须办理人/管理员/系统身份：同租户非办理人被拒（横向越权防护）。
+func TestTaskComments_RequireAssigneeOrAdmin(t *testing.T) {
+	q := commentTestDB(t)
+	svc := newCommentSvc(q)
+	ctx := context.Background()
+	now := time.Now()
+
+	require.NoError(t, svc.taskDAO.Create(ctx, &model.WfTask{
+		ID: "task-p1", Status: string(enums.TaskStatusActive), TenantID: "t1",
+		ProcessInstanceID: secFixStrPtr("inst-p1"), Name: "审批", TaskType: "user_task",
+		Assignee: secFixStrPtr("worker"), CreatedAt: now, CreatedBy: "sys",
+	}))
+
+	// 同租户非办理人 → 拒绝
+	_, err := svc.AddTaskComment(ctx, Actor{UserID: "eve", TenantID: "t1"}, "task-p1", "越权评论")
+	require.ErrorIs(t, err, ErrPermissionDenied, "同租户非办理人评论他人任务应被拒绝")
+
+	// 办理人 → 放行
+	_, err = svc.AddTaskComment(ctx, Actor{UserID: "worker", TenantID: "t1"}, "task-p1", "正常意见")
+	require.NoError(t, err)
+
+	// 管理员 → 放行
+	_, err = svc.AddTaskComment(ctx, Actor{UserID: "admin", TenantID: "t1", SuperAdmin: true}, "task-p1", "管理意见")
+	require.NoError(t, err)
 }
