@@ -278,6 +278,23 @@ func TestRuntimeServiceImpl_RestoreProcessInstance_NilDAO_Panics(t *testing.T) {
 	})
 }
 
+// 恢复（重驱动）实例须属主/管理员：同租户非发起人被拒（横向越权防护）。
+func TestRuntimeServiceImpl_RestoreProcessInstance_OwnerAuthorized(t *testing.T) {
+	q := rtImplTestDB(t)
+	instDAO := dao.NewInstanceDAOWithQuery(q)
+	svc := &RuntimeServiceImpl{instanceDAO: instDAO}
+	ctx := context.Background()
+
+	require.NoError(t, instDAO.Create(ctx, &model.WfInstance{
+		ID: "inst-restore", ProcessID: "proc-1", Name: "restore", Status: string(enums.InstanceStatusActive),
+		TenantID: "t1", CreatedBy: "starter", StartUserID: "starter", CreatedAt: time.Now(),
+	}))
+
+	// 同租户非发起人 → 拒绝（属主校验在租户校验之后、重驱动之前触发）
+	err := svc.RestoreProcessInstance(ctx, Actor{UserID: "eve", TenantID: "t1"}, "inst-restore")
+	require.ErrorIs(t, err, ErrPermissionDenied)
+}
+
 // ---------------------------------------------------------------------------
 // RestoreAllProcessInstances
 // ---------------------------------------------------------------------------

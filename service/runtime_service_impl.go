@@ -1471,6 +1471,11 @@ func (s *RuntimeServiceImpl) RestoreProcessInstance(ctx context.Context, actor A
 	if err := ensureTenantAccess(ctx, "process instance", instance.TenantID); err != nil {
 		return err
 	}
+	// 属主校验：恢复（重驱动全部在办/待触发任务）会重新执行节点副作用，
+	// 与实例生命周期级变更同口径（发起人/管理员/系统），防止同租户横向越权重驱动他人实例。
+	if err := requireInstanceOwnerAuthorized(ctx, instance); err != nil {
+		return err
+	}
 
 	// 恢复的读-判-驱窗口须与对端副本的驱动互斥，避免基于过期任务快照重复 restore
 	if unlock := s.acquireDistExecGate(ctx, processInstanceID); unlock != nil {
