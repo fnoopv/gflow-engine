@@ -150,7 +150,7 @@ func TestRescueExpiredDelayTask_Validation(t *testing.T) {
 	rs := newDelayRescueRS(q)
 	now := time.Now()
 	ctx := context.Background()
-	sysActor := Actor{UserID: "sys", TenantID: "t1"}
+	sysActor := Actor{UserID: "sys", TenantID: "t1", SuperAdmin: true}
 
 	// 实例供任务关联
 	require.NoError(t, dao.NewInstanceDAOWithQuery(q).Create(ctx, &model.WfInstance{
@@ -218,7 +218,7 @@ func TestRescueExpiredDelayTask_GateBusy(t *testing.T) {
 	rs.workflowEngine = &gateTestEngine{l: shared}
 	now := time.Now()
 	ctx := context.Background()
-	sysActor := Actor{UserID: "sys", TenantID: "t1"}
+	sysActor := Actor{UserID: "sys", TenantID: "t1", SuperAdmin: true}
 
 	require.NoError(t, dao.NewInstanceDAOWithQuery(q).Create(ctx, &model.WfInstance{
 		ID: "inst-busy", ProcessID: "proc-d", Name: "d", Status: string(enums.InstanceStatusActive),
@@ -243,7 +243,7 @@ func TestReDriveProcessInstance_GateBusy(t *testing.T) {
 	rs.workflowEngine = &gateTestEngine{l: shared}
 	now := time.Now()
 	ctx := context.Background()
-	sysActor := Actor{UserID: "sys", TenantID: "t1"}
+	sysActor := Actor{UserID: "sys", TenantID: "t1", SuperAdmin: true}
 
 	activity := "node_ai"
 	require.NoError(t, dao.NewInstanceDAOWithQuery(q).Create(ctx, &model.WfInstance{

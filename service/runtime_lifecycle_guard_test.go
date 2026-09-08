@@ -61,7 +61,9 @@ func TestSuspendProcessInstance_DraftRejected(t *testing.T) {
 func TestTerminateInTx_NotifiesOnlyLiveAssignees(t *testing.T) {
 	rs, _ := lifecycleDB(t)
 	q := secFixDB(t)
-	ctx := context.Background()
+	// TerminateInTx 是内部 API（生产路径由 TerminateProcessInstance/Withdraw 在已通过属主/
+	// 租户校验后调用）；本测试直接驱动收尾逻辑，故标记为引擎内部模式，跳过属主重校验。
+	ctx := WithInternalCallingMode(context.Background())
 	now := time.Now()
 
 	require.NoError(t, rs.instanceDAO.Create(ctx, &model.WfInstance{

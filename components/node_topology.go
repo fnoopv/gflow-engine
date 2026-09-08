@@ -67,9 +67,11 @@ func terminateInstance(rs service.RuntimeService, nodeID string, ctx types.RuleC
 		ctx.TellFailure(msg, fmt.Errorf("reject: runtime service unavailable"))
 		return
 	}
-	termCtx := service.WithEventSource(ctx.GetContext(), service.EventSourceReject)
+	termCtx := service.WithInternalCallingMode(service.WithEventSource(ctx.GetContext(), service.EventSourceReject))
 	// 显式 actor：驳回级联终止归属实际驳回人（ctx 身份）；ctx 无身份时按系统动作处理，
-	// 并从链元数据补齐租户（TerminateProcessInstance 的租户校验依赖 TenantID）
+	// 并从链元数据补齐租户（TerminateProcessInstance 的租户校验依赖 TenantID）；
+	// WithInternalCallingMode 标记为引擎内部级联，跳过实例属主校验（驳回人是对该实例
+	// 有审批权的参与人而非发起人，终止是回路语义驱动的副作用，不是越权终止他人实例）。
 	actor := service.ActorFromCtx(termCtx)
 	if actor.TenantID == "" {
 		actor.TenantID = metaValue(msg, constants.KeyTenantID)

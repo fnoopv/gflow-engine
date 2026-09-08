@@ -174,10 +174,26 @@ func (s *TaskServiceImpl) GetTaskCandidates(ctx context.Context, processInstance
 // AddCandidates 批量写入任务候选人（每条 entityID 一条 wf_task_assignee 记录）。
 func (s *TaskServiceImpl) AddCandidates(ctx context.Context, actor Actor, taskID, entityType string, entityIDs []string) error {
 	ctx = bindActor(ctx, actor)
-	tenantID := actor.TenantID
 	if taskID == "" || entityType == "" {
 		return fmt.Errorf("taskID and entityType cannot be empty")
 	}
+	// 候选人池变更属改派类管理操作：强制管理员/系统身份（与 Reassign/SetAssignee 一致），
+	// 否则任意同租户用户可自助 AddCandidates(自己)→Claim→审批劫持任务。
+	if err := requireAdminIdentity(&actor); err != nil {
+		return err
+	}
+	// 任务存在性 + 租户一致性：跨租户按 NotFound 处理，不泄露任务存在性。
+	task, err := s.taskDAO.Get(ctx, taskID)
+	if err != nil {
+		return fmt.Errorf("failed to get task: %w", err)
+	}
+	if task == nil {
+		return fmt.Errorf("%w: task", ErrNotFound)
+	}
+	if task.TenantID != actor.TenantID {
+		return fmt.Errorf("%w: task", ErrNotFound)
+	}
+	tenantID := actor.TenantID
 	if len(entityIDs) == 0 {
 		return nil
 	}
@@ -207,10 +223,24 @@ func (s *TaskServiceImpl) AddCandidates(ctx context.Context, actor Actor, taskID
 // RemoveCandidates 移除任务候选人（按 entityType + entityIDs 批量删除，单 SQL 原子）。
 func (s *TaskServiceImpl) RemoveCandidates(ctx context.Context, actor Actor, taskID, entityType string, entityIDs []string) error {
 	ctx = bindActor(ctx, actor)
-	tenantID := actor.TenantID
 	if taskID == "" || entityType == "" {
 		return fmt.Errorf("taskID and entityType cannot be empty")
 	}
+	// 同 AddCandidates：候选人池变更强制管理员/系统身份，并校验任务存在性与租户一致性。
+	if err := requireAdminIdentity(&actor); err != nil {
+		return err
+	}
+	task, err := s.taskDAO.Get(ctx, taskID)
+	if err != nil {
+		return fmt.Errorf("failed to get task: %w", err)
+	}
+	if task == nil {
+		return fmt.Errorf("%w: task", ErrNotFound)
+	}
+	if task.TenantID != actor.TenantID {
+		return fmt.Errorf("%w: task", ErrNotFound)
+	}
+	tenantID := actor.TenantID
 	filtered := make([]string, 0, len(entityIDs))
 	for _, eid := range entityIDs {
 		if eid != "" {
