@@ -69,7 +69,7 @@ func (s *TaskServiceImpl) GetTaskComments(ctx context.Context, actor Actor, task
 	if err != nil {
 		return nil, err
 	}
-	if u := GetUserFromCtx(ctx); u != nil && u.TenantID != "" && task.TenantID != u.TenantID {
+	if u := GetUserFromCtx(ctx); u != nil && !IsSystemActor(u) && task.TenantID != u.TenantID {
 		return nil, fmt.Errorf("%w: task", ErrNotFound)
 	}
 	return s.taskCommentDAO.ListByTaskID(ctx, taskID)

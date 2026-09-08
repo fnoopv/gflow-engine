@@ -59,11 +59,13 @@ type RuntimeService interface {
 	// UpdateInstanceCurrentActivity 更新 active 实例的当前节点（userTask 创建任务时由节点回调）
 	UpdateInstanceCurrentActivity(ctx context.Context, processInstanceID, activityKey string) error
 
-	// GetStuckProcessInstances 找出 active 但无未决任务的卡死实例（对账巡检/管理端救援）
-	GetStuckProcessInstances(ctx context.Context, tenantID string) ([]*model.WfInstance, error)
+	// GetStuckProcessInstances 找出 active 但无未决任务的卡死实例（对账巡检/管理端救援）。
+	// 仅管理员/系统身份可巡，租户取自操作人（系统空租户＝平台级全租户扫描）。
+	GetStuckProcessInstances(ctx context.Context, actor Actor) ([]*model.WfInstance, error)
 
-	// GetExpiredDelayTasks 找出超期未完成的 delay 任务（计时器丢失检测）
-	GetExpiredDelayTasks(ctx context.Context, tenantID string) ([]*model.WfTask, error)
+	// GetExpiredDelayTasks 找出超期未完成的 delay 任务（计时器丢失检测）。
+	// 仅管理员/系统身份可巡，租户取自操作人（系统空租户＝平台级全租户扫描）。
+	GetExpiredDelayTasks(ctx context.Context, actor Actor) ([]*model.WfTask, error)
 
 	// RescueExpiredDelayTask 救援超期的 delay 任务：携带既有 task_id 与已等待
 	// 偏移重入 delay 节点，完成后继续流转，不新建任务行。

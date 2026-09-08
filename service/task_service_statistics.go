@@ -27,10 +27,11 @@ func (s *TaskServiceImpl) GetTaskList(ctx context.Context, actor Actor, query *d
 	if query == nil {
 		query = &dto.TaskQuery{}
 	}
-	// 强制以 actor 租户为查询范围；空租户视为系统视角，不做租户过滤
-	if u := GetUserFromCtx(ctx); u != nil && u.TenantID != "" {
-		query.TenantID = u.TenantID
+	// 强制以 actor 租户为查询范围：系统身份空租户＝平台级扫描，非系统空租户 fail-closed。
+	if err := requireNonEmptyTenantForRealUser(&actor); err != nil {
+		return nil, 0, err
 	}
+	query.TenantID = actor.TenantID
 	// QueryTasks 处理 nil query 与历史表路由，避免这里解引用空指针
 	return s.QueryTasks(ctx, query)
 }

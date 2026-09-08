@@ -300,7 +300,7 @@ func TestGetTaskCandidates_RoleExpanded(t *testing.T) {
 	taskSvc := newCandSvc(q, identity)
 	require.NoError(t, taskSvc.AddCandidates(ctx, Actor{UserID: "system", TenantID: "t1"}, "task-cand", "role", []string{"role-a"}))
 
-	candidates, err := taskSvc.GetTaskCandidates(ctx, "inst-cand", "approve-node")
+	candidates, err := taskSvc.GetTaskCandidates(ctx, Actor{UserID: "tester", TenantID: "t1"}, "inst-cand", "approve-node")
 	require.NoError(t, err)
 	require.NotEmpty(t, candidates, "role 任务候选展开后应非空")
 
@@ -324,15 +324,43 @@ func TestGetTaskCandidates_IdentityNil(t *testing.T) {
 	require.NoError(t, taskSvc.AddCandidates(ctx, Actor{UserID: "system", TenantID: "t1"}, "task-mix", "role", []string{"role-a"}))
 	require.NoError(t, taskSvc.AddCandidates(ctx, Actor{UserID: "system", TenantID: "t1"}, "task-mix", "person", []string{"p1"}))
 
-	_, err := taskSvc.GetTaskCandidates(ctx, "inst-mix", "approve-node")
+	_, err := taskSvc.GetTaskCandidates(ctx, Actor{UserID: "tester", TenantID: "t1"}, "inst-mix", "approve-node")
 	require.Error(t, err, "identity 缺失且池含 role 实体时必须报错")
 
 	require.NoError(t, taskSvc.RemoveCandidates(ctx, Actor{UserID: "system", TenantID: "t1"}, "task-mix", "role", []string{"role-a"}))
-	candidates, err := taskSvc.GetTaskCandidates(ctx, "inst-mix", "approve-node")
+	candidates, err := taskSvc.GetTaskCandidates(ctx, Actor{UserID: "tester", TenantID: "t1"}, "inst-mix", "approve-node")
 	require.NoError(t, err)
 	require.Len(t, candidates, 1, "纯 person 池不依赖 identity")
 	require.Equal(t, "p1", candidates[0].EntityID)
 	require.Equal(t, "person", candidates[0].EntityType)
+}
+
+// TestGetTaskCandidates_CrossTenantDenied 验证候选人读取的租户作用域：跨租户与
+// 空租户真实用户均被拒（不泄露候选人/审批人身份）。
+func TestGetTaskCandidates_CrossTenantDenied(t *testing.T) {
+	q := candGroupDB(t)
+	ctx := context.Background()
+	seedRoleInstance(t, q, "task-cand", "inst-cand")
+	taskSvc := newCandSvc(q, newMockIdentity())
+
+	_, err := taskSvc.GetTaskCandidates(ctx, Actor{UserID: "eve", TenantID: "other"}, "inst-cand", "approve-node")
+	require.ErrorIs(t, err, ErrPermissionDenied)
+	_, err = taskSvc.GetTaskCandidates(ctx, Actor{UserID: "eve"}, "inst-cand", "approve-node")
+	require.ErrorIs(t, err, ErrPermissionDenied)
+}
+
+// TestGetNodeApprovalStatus_CrossTenantDenied 验证节点审批状态读取的租户作用域：
+// 跨租户与空租户真实用户按拒绝处理，不泄露审批人身份。
+func TestGetNodeApprovalStatus_CrossTenantDenied(t *testing.T) {
+	q := candGroupDB(t)
+	ctx := context.Background()
+	seedRoleInstance(t, q, "task-cand", "inst-cand")
+	taskSvc := newCandSvc(q, newMockIdentity())
+
+	_, err := taskSvc.GetNodeApprovalStatus(ctx, Actor{UserID: "eve", TenantID: "other"}, "task-cand")
+	require.ErrorIs(t, err, ErrPermissionDenied)
+	_, err = taskSvc.GetNodeApprovalStatus(ctx, Actor{UserID: "eve"}, "task-cand")
+	require.ErrorIs(t, err, ErrPermissionDenied)
 }
 
 // TestGetClaimableInstanceIDs 批量判断可认领实例：

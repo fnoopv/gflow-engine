@@ -269,15 +269,16 @@ func (s *ProcessServiceImpl) create(ctx context.Context, process *model.WfProces
 }
 
 // List 分页查询流程定义列表。
-// 强制以 actor 租户为查询范围；空租户视为系统视角，不做租户过滤。
+// 强制以 actor 租户为查询范围：系统身份空租户＝平台级扫描，非系统空租户 fail-closed。
 func (s *ProcessServiceImpl) List(ctx context.Context, actor Actor, request *dto.ProcessQueryRequest) ([]*model.WfProcess, int64, error) {
 	ctx = bindActor(ctx, actor)
 	if request == nil {
 		request = &dto.ProcessQueryRequest{}
 	}
-	if u := GetUserFromCtx(ctx); u != nil && u.TenantID != "" {
-		request.TenantID = u.TenantID
+	if err := requireNonEmptyTenantForRealUser(&actor); err != nil {
+		return nil, 0, err
 	}
+	request.TenantID = actor.TenantID
 	return s.processDAO.List(ctx, request)
 }
 

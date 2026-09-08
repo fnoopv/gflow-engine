@@ -38,10 +38,10 @@ func (s *TaskServiceImpl) GetTaskByDefKey(ctx context.Context, processInstanceID
 	if len(tasks) == 0 {
 		return nil, nil
 	}
-	// 租户校验：ctx 用户租户非空时任务必须同租户，否则按 NotFound 处理
-	// （不泄露存在性），与 GetHistoryTask 同口径
+	// 租户校验：非系统操作人必须与任务同租户（真实用户空租户 fail-closed），否则按
+	// NotFound 处理（不泄露存在性），与 GetHistoryTask 同口径
 	task := tasks[0]
-	if u := GetUserFromCtx(ctx); u != nil && u.TenantID != "" && task.TenantID != u.TenantID {
+	if u := GetUserFromCtx(ctx); u != nil && !IsSystemActor(u) && task.TenantID != u.TenantID {
 		return nil, fmt.Errorf("%w: task", ErrNotFound)
 	}
 	return task, nil
