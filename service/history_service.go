@@ -7,8 +7,8 @@ import (
 
 // HistoryService 历史服务接口
 // 提供流程历史数据的查询和管理功能
-// 查询类方法以显式 actor 传入查询视角：actor.TenantID 非空时作为租户范围
-// （单条读做归属校验，列表读强制过滤）；空租户视为系统视角，不做租户限制。
+// 查询类方法以 actor 传入查询视角：真实用户按 actor.TenantID 校验/过滤
+// （单条读校验归属，列表读强制过滤，空租户拒绝）；系统身份空租户为全租户视角。
 type HistoryService interface {
 	// GetHistoricProcessInstances 获取历史流程实例列表
 	GetHistoricProcessInstances(ctx context.Context, actor Actor, query *HistoricProcessInstanceQuery) ([]*HistoricProcessInstance, int64, error)

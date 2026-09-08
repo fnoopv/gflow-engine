@@ -105,11 +105,14 @@ func (s *TaskServiceImpl) GetTaskCandidates(ctx context.Context, actor Actor, pr
 	if len(tasks) > 0 {
 		tenantID = tasks[0].TenantID
 	}
-	// 租户校验：任务存在时按调用方租户拦截跨租户读取（IDOR 防护）。
+	// 租户校验：任务租户非空时拦截跨租户读取（IDOR 防护）；租户为空的脏数据行
+	// 会跳过 ensureTenantAccess，对空租户真实用户兜底拒绝。
 	if tenantID != "" {
 		if err := ensureTenantAccess(ctx, "task", tenantID); err != nil {
 			return nil, err
 		}
+	} else if err := requireNonEmptyTenantForRealUser(&actor); err != nil {
+		return nil, err
 	}
 
 	rows, err := s.taskAssigneeDAO.GetByInstanceAndDefKey(ctx, tenantID, processInstanceID, taskDefKey)
@@ -179,29 +182,34 @@ func (s *TaskServiceImpl) GetTaskCandidates(ctx context.Context, actor Actor, pr
 	return candidates, nil
 }
 
+// taskForAdminMutation 候选人池变更的前置校验：要求管理员/系统身份（同
+// Reassign/SetAssignee，否则任意同租户用户可加自己为候选再认领劫持任务），
+// 并校验任务存在且同租户，两种不满足都按 NotFound 返回，不泄露存在性。
+func (s *TaskServiceImpl) taskForAdminMutation(ctx context.Context, actor Actor, taskID string) (*model.WfTask, error) {
+	if err := requireAdminIdentity(&actor); err != nil {
+		return nil, err
+	}
+	task, err := s.taskDAO.Get(ctx, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get task: %w", err)
+	}
+	if task == nil || task.TenantID != actor.TenantID {
+		return nil, fmt.Errorf("%w: task", ErrNotFound)
+	}
+	return task, nil
+}
+
 // AddCandidates 批量写入任务候选人（每条 entityID 一条 wf_task_assignee 记录）。
 func (s *TaskServiceImpl) AddCandidates(ctx context.Context, actor Actor, taskID, entityType string, entityIDs []string) error {
 	ctx = bindActor(ctx, actor)
 	if taskID == "" || entityType == "" {
 		return fmt.Errorf("taskID and entityType cannot be empty")
 	}
-	// 候选人池变更属改派类管理操作：强制管理员/系统身份（与 Reassign/SetAssignee 一致），
-	// 否则任意同租户用户可自助 AddCandidates(自己)→Claim→审批劫持任务。
-	if err := requireAdminIdentity(&actor); err != nil {
+	task, err := s.taskForAdminMutation(ctx, actor, taskID)
+	if err != nil {
 		return err
 	}
-	// 任务存在性 + 租户一致性：跨租户按 NotFound 处理，不泄露任务存在性。
-	task, err := s.taskDAO.Get(ctx, taskID)
-	if err != nil {
-		return fmt.Errorf("failed to get task: %w", err)
-	}
-	if task == nil {
-		return fmt.Errorf("%w: task", ErrNotFound)
-	}
-	if task.TenantID != actor.TenantID {
-		return fmt.Errorf("%w: task", ErrNotFound)
-	}
-	tenantID := actor.TenantID
+	tenantID := task.TenantID
 	if len(entityIDs) == 0 {
 		return nil
 	}
@@ -234,21 +242,11 @@ func (s *TaskServiceImpl) RemoveCandidates(ctx context.Context, actor Actor, tas
 	if taskID == "" || entityType == "" {
 		return fmt.Errorf("taskID and entityType cannot be empty")
 	}
-	// 同 AddCandidates：候选人池变更强制管理员/系统身份，并校验任务存在性与租户一致性。
-	if err := requireAdminIdentity(&actor); err != nil {
+	task, err := s.taskForAdminMutation(ctx, actor, taskID)
+	if err != nil {
 		return err
 	}
-	task, err := s.taskDAO.Get(ctx, taskID)
-	if err != nil {
-		return fmt.Errorf("failed to get task: %w", err)
-	}
-	if task == nil {
-		return fmt.Errorf("%w: task", ErrNotFound)
-	}
-	if task.TenantID != actor.TenantID {
-		return fmt.Errorf("%w: task", ErrNotFound)
-	}
-	tenantID := actor.TenantID
+	tenantID := task.TenantID
 	filtered := make([]string, 0, len(entityIDs))
 	for _, eid := range entityIDs {
 		if eid != "" {

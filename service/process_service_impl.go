@@ -354,6 +354,12 @@ func (s *ProcessServiceImpl) Delete(ctx context.Context, actor Actor, processID 
 		return fmt.Errorf("process definition ID cannot be empty")
 	}
 
+	// Get 内含租户归属校验：跨租户按 NotFound 返回，也避免下方运行实例检查
+	// （按 processID 全表查）对异租户 ID 泄露存在性。
+	if _, err := s.Get(ctx, processID); err != nil {
+		return err
+	}
+
 	// 检查是否有正在运行的流程实例
 	// 如果有正在运行的实例，应该禁止删除或者提供强制删除选项
 	instances, _, err := s.instanceDAO.GetByProcessID(ctx, processID, 1, 0)

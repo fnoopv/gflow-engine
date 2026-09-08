@@ -108,3 +108,50 @@ func TestTerminateInTx_NotifiesOnlyLiveAssignees(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, string(enums.InstanceStatusTerminated), hiInst.Status)
 }
+
+// 唤醒挂起实例的身份口径：发起人、管理员，以及持有该实例未收尾任务的办理人
+// 可唤醒（挂起使其丢掉待办入口）；无关同租户用户按属主校验拒绝。
+func TestActivateProcessInstance_WakeAuthorization(t *testing.T) {
+	rs, _ := lifecycleDB(t)
+	q := secFixDB(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	newSuspended := func(instID string) {
+		t.Helper()
+		require.NoError(t, rs.instanceDAO.Create(ctx, &model.WfInstance{
+			ID: instID, ProcessID: "proc-wake", Name: "唤醒单",
+			Status: string(enums.InstanceStatusSuspended), TenantID: "t1",
+			StartUserID: "userA", CreatedBy: "userA", CreatedAt: now,
+		}))
+		require.NoError(t, q.WfTask.Create(&model.WfTask{
+			ID: "task-" + instID, ProcessInstanceID: secFixStrPtr(instID), TaskDefKey: "n1",
+			Name: "审批节点", TaskType: "user_task",
+			Status: string(enums.TaskStatusSuspended), Assignee: secFixStrPtr("userB"),
+			TenantID: "t1", CreatedBy: "system", CreatedAt: now,
+		}))
+	}
+
+	// 办理人：非发起人非管理员，但持有挂起任务
+	newSuspended("inst-wake-assignee")
+	require.NoError(t, rs.ActivateProcessInstance(ctx, Actor{UserID: "userB", TenantID: "t1"}, "inst-wake-assignee"))
+	inst, err := rs.instanceDAO.Get(ctx, "inst-wake-assignee")
+	require.NoError(t, err)
+	require.Equal(t, string(enums.InstanceStatusActive), inst.Status, "办理人唤醒后实例应回到 active")
+	task, err := rs.taskDAO.Get(ctx, "task-inst-wake-assignee")
+	require.NoError(t, err)
+	require.Equal(t, string(enums.TaskStatusActive), task.Status, "挂起任务应随唤醒回到 active")
+
+	// 无关同租户用户：不持有任务
+	newSuspended("inst-wake-eve")
+	err = rs.ActivateProcessInstance(ctx, Actor{UserID: "eve", TenantID: "t1"}, "inst-wake-eve")
+	require.ErrorIs(t, err, ErrPermissionDenied, "无关用户唤醒他人实例必须被拒")
+
+	// 发起人
+	newSuspended("inst-wake-owner")
+	require.NoError(t, rs.ActivateProcessInstance(ctx, Actor{UserID: "userA", TenantID: "t1"}, "inst-wake-owner"))
+
+	// 管理员
+	newSuspended("inst-wake-admin")
+	require.NoError(t, rs.ActivateProcessInstance(ctx, Actor{UserID: "admin", TenantID: "t1", SuperAdmin: true}, "inst-wake-admin"))
+}

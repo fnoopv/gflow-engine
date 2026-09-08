@@ -59,13 +59,11 @@ func (s *TaskServiceImpl) mergeVariables(existingVariables *string, newVariables
 
 // CompleteWithApproval 完成任务（带审批意见）
 func (s *TaskServiceImpl) CompleteWithApproval(ctx context.Context, actor Actor, request *ApprovalRequest) error {
-	// bindActor：显式 actor 绑定进 ctx（内部管道读取身份/派发事件），
-	// 未标记调用模式的 ctx 一律升级为 API 入口（缺身份时拒绝，而不是静默跳过校验）。
-	// 引擎内部调用（create_task_aspect 等）会先以 WithInternalCallingMode 标记 ctx，
-	// 该标记优先级更高，不受本升级影响。
-	ctx = bindActor(ctx, actor)
-	// 第二重信号：内部 ctx 携带真实用户身份时降级为 API 模式（防宿主误用内部 ctx）
-	ctx = forceAPICallingModeForRealUser(ctx)
+	// bindActorAPI：actor 绑进 ctx（内部管道读取身份/派发事件），未标记调用模式的
+	// ctx 升级为 API 入口（缺身份时拒绝，而不是静默跳过校验）。
+	// 引擎内部调用（create_task_aspect 等）以 WithInternalCallingMode 标记 ctx，
+	// 纯系统上下文保持内部模式不变。
+	ctx = bindActorAPI(ctx, actor)
 	if request == nil {
 		return fmt.Errorf("approval request cannot be nil")
 	}

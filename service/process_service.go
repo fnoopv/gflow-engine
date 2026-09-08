@@ -20,8 +20,8 @@ type ProcessService interface {
 	// 禁止修改 processKey）
 	Update(ctx context.Context, actor Actor, process *model.WfProcess) error
 
-	// List 按条件分页查询流程定义。actor 租户非空时强制按租户过滤；
-	// 空租户视为系统视角不做过滤。request - 查询条件。
+	// List 按条件分页查询流程定义。真实用户按 actor 租户过滤（空租户拒绝）；
+	// 系统身份空租户为全租户视角。request - 查询条件。
 	List(ctx context.Context, actor Actor, request *dto.ProcessQueryRequest) ([]*model.WfProcess, int64, error)
 
 	// Get 根据ID获取流程定义

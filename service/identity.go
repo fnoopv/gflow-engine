@@ -113,6 +113,14 @@ func bindActor(ctx context.Context, actor Actor) context.Context {
 	return ctx
 }
 
+// bindActorAPI 在 bindActor 之上把携带真实用户的内部标记 ctx 降级为 API 模式
+// （见 forceAPICallingModeForRealUser），防宿主复用内部 ctx 绕过 assignee/属主校验。
+// 无引擎内部级联的公共入口用本方法；TerminateProcessInstance 等依赖内部模式豁免
+// 属主校验的入口必须保持 bindActor。
+func bindActorAPI(ctx context.Context, actor Actor) context.Context {
+	return forceAPICallingModeForRealUser(bindActor(ctx, actor))
+}
+
 // ensureTenantAccess 校验 ctx 操作人与资源属同租户。resourceDesc 用于错误信息
 // （如 "process instance"）。跨租户按 ErrPermissionDenied 拒绝；需要隐藏资源
 // 存在性的路径（claim/withdraw 等）仍应各自按 ErrNotFound 处理，不走本方法。

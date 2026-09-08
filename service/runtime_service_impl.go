@@ -307,7 +307,7 @@ func (s *RuntimeServiceImpl) GetProcessInstance(ctx context.Context, actor Actor
 // 实例已归档（活表无行）时改为把历史行标记 deleted——删除落在终态归档之后的
 // 实例是合法操作，仅剩历史行可标，标记后已办/抄送不再带出。
 func (s *RuntimeServiceImpl) DeleteProcessInstance(ctx context.Context, actor Actor, processInstanceID, reason string) error {
-	ctx = bindActor(ctx, actor)
+	ctx = bindActorAPI(ctx, actor)
 	if processInstanceID == "" {
 		return fmt.Errorf("process instance ID cannot be empty")
 	}
@@ -462,7 +462,7 @@ func (s *RuntimeServiceImpl) DeleteProcessInstances(ctx context.Context, actor A
 
 // SuspendProcessInstance 挂起流程实例
 func (s *RuntimeServiceImpl) SuspendProcessInstance(ctx context.Context, actor Actor, processInstanceID string) error {
-	ctx = bindActor(ctx, actor)
+	ctx = bindActorAPI(ctx, actor)
 	if processInstanceID == "" {
 		return fmt.Errorf("process instance ID cannot be empty")
 	}
@@ -570,7 +570,7 @@ func (s *RuntimeServiceImpl) suspendProcessInstanceInternal(ctx context.Context,
 // 回调 TaskService 创建任务时会各自进入 WithInstanceTx，若嵌套在同一事务会死锁。
 // 草稿激活视为正式发起：按原创建者重查发起人范围，且仅创建者本人可激活。
 func (s *RuntimeServiceImpl) ActivateProcessInstance(ctx context.Context, actor Actor, processInstanceID string) error {
-	ctx = bindActor(ctx, actor)
+	ctx = bindActorAPI(ctx, actor)
 	if processInstanceID == "" {
 		return fmt.Errorf("process instance ID cannot be empty")
 	}
@@ -679,11 +679,15 @@ func (s *RuntimeServiceImpl) activateProcessInstanceInternal(ctx context.Context
 		}
 	}
 
-	// 挂起恢复（非草稿路径）也要求实例属主/管理员身份，与终止/删除/重启/强恢复等
-	// 实例级变更口径一致（fail-closed）。草稿激活已在上面按创建者校验。
+	// 挂起恢复（非草稿路径）要求实例属主/管理员，与终止/删除/重启同口径；
+	// 草稿激活已在上面按创建者校验。挂起会让办理人丢掉待办入口，故属主校验不过
+	// 时再放行持有该实例未收尾任务的办理人（唤醒继续审批），终止/删除不放宽。
 	if instance.Status != string(enums.InstanceStatusDraft) {
 		if err := requireInstanceOwnerAuthorized(ctx, instance); err != nil {
-			return nil, false, err
+			u := GetUserFromCtx(ctx)
+			if u == nil || u.UserID == "" || !s.hasPendingTaskForAssignee(ctx, scope, processInstanceID, u.UserID) {
+				return nil, false, err
+			}
 		}
 	}
 
@@ -757,6 +761,30 @@ func (s *RuntimeServiceImpl) activateProcessInstanceInternal(ctx context.Context
 
 	// wasDraft 时由调用方在事务外启动引擎，此处统一返回
 	return instance, wasDraft, nil
+}
+
+// hasPendingTaskForAssignee 判断实例上是否有指派给该用户的未收尾任务。
+// 挂起会把任务级联置为 suspended，故按非终态判定；查询失败按无任务处理。
+func (s *RuntimeServiceImpl) hasPendingTaskForAssignee(ctx context.Context, scope *InstanceScope, processInstanceID, userID string) bool {
+	if userID == "" {
+		return false
+	}
+	q := scope.Tx().WfTask
+	rows, err := q.WithContext(ctx).
+		Where(q.ProcessInstanceID.Eq(processInstanceID)).
+		Where(q.Status.NotIn(
+			string(enums.TaskStatusCompleted),
+			string(enums.TaskStatusReturned),
+			string(enums.TaskStatusWithdrawn),
+			string(enums.TaskStatusTerminated),
+		)).
+		Where(q.Assignee.Eq(userID)).
+		Find()
+	if err != nil {
+		logrus.Warnf("wake assignee check failed for instance %s user %s: %v", processInstanceID, userID, err)
+		return false
+	}
+	return len(rows) > 0
 }
 
 // GetProcessInstanceVariables 获取流程实例变量
@@ -923,7 +951,7 @@ func (s *RuntimeServiceImpl) setProcessInstanceVariablesInTx(ctx context.Context
 //   - 不会迁移原实例的运行时上下文（current_activity / 任务状态），新实例从 activityID 开始；
 //   - 原 variables JSON 反序列化失败时新实例以空变量启动，不阻断重启流程。
 func (s *RuntimeServiceImpl) RestartProcessInstance(ctx context.Context, actor Actor, processInstanceID, activityID string) (string, error) {
-	ctx = bindActor(ctx, actor)
+	ctx = bindActorAPI(ctx, actor)
 	if processInstanceID == "" {
 		return "", fmt.Errorf("process instance ID cannot be empty")
 	}
@@ -1308,7 +1336,7 @@ func (s *RuntimeServiceImpl) executeNextLocked(ctx context.Context, processInsta
 // 如果实例不在 fork-join 拓扑里，返回 ErrUnsupportedForkTopology。
 // 如果实例已是终态，返回 gorm.ErrRecordNotFound 风格错误。
 func (s *RuntimeServiceImpl) ForceResumeInstance(ctx context.Context, actor Actor, processInstanceID string) error {
-	ctx = bindActor(ctx, actor)
+	ctx = bindActorAPI(ctx, actor)
 	if processInstanceID == "" {
 		return fmt.Errorf("process instance ID cannot be empty")
 	}
@@ -1658,7 +1686,7 @@ func (s *RuntimeServiceImpl) GetExpiredDelayTasks(ctx context.Context, actor Act
 // "时长-偏移"重挂剩余计时器。经跨副本执行门闩与对端驱动互斥，拿到门闩后
 // 重读任务，已被在途计时器收尾的幂等返回 nil。
 func (s *RuntimeServiceImpl) RescueExpiredDelayTask(ctx context.Context, actor Actor, taskID string) error {
-	ctx = bindActor(ctx, actor)
+	ctx = bindActorAPI(ctx, actor)
 	if taskID == "" {
 		return fmt.Errorf("task ID cannot be empty")
 	}
@@ -1790,7 +1818,7 @@ func isDelayTaskWaiting(status string) bool {
 // 引擎的幂等路径（已有任务则等待 / 终态保护）会拒绝重复推进。
 // 变量传 nil 时引擎沿用实例变量。
 func (s *RuntimeServiceImpl) ReDriveProcessInstance(ctx context.Context, actor Actor, processInstanceID string) error {
-	ctx = bindActor(ctx, actor)
+	ctx = bindActorAPI(ctx, actor)
 	instance, err := s.GetProcessInstance(ctx, actor, processInstanceID)
 	if err != nil {
 		return fmt.Errorf("failed to get process instance: %w", err)
@@ -2038,8 +2066,8 @@ func (s *RuntimeServiceImpl) CountMyApplicationsByBuckets(ctx context.Context, a
 	if userID == "" {
 		return nil, fmt.Errorf("user ID cannot be empty")
 	}
-	if tenantID == "" {
-		return nil, fmt.Errorf("tenant ID cannot be empty")
+	if err := requireNonEmptyTenantForRealUser(&actor); err != nil {
+		return nil, err
 	}
 	return s.instanceDAO.CountInstancesUnionByBuckets(ctx, tenantID, "", userID, keyword, nil, nil, instanceStatusBuckets(true))
 }
@@ -2050,8 +2078,8 @@ func (s *RuntimeServiceImpl) CountDoneByBuckets(ctx context.Context, actor Actor
 	if actor.UserID == "" {
 		return nil, fmt.Errorf("user ID cannot be empty")
 	}
-	if actor.TenantID == "" {
-		return nil, fmt.Errorf("tenant ID cannot be empty")
+	if err := requireNonEmptyTenantForRealUser(&actor); err != nil {
+		return nil, err
 	}
 	q := &dto.TaskQuery{
 		Assignee:     actor.UserID,
@@ -2125,8 +2153,8 @@ func (s *RuntimeServiceImpl) CountMyApplications(ctx context.Context, actor Acto
 	if userID == "" {
 		return 0, fmt.Errorf("user ID cannot be empty")
 	}
-	if tenantID == "" {
-		return 0, fmt.Errorf("tenant ID cannot be empty")
+	if err := requireNonEmptyTenantForRealUser(&actor); err != nil {
+		return 0, err
 	}
 	_, total, err := s.instanceDAO.GetInstancesUnionPagination(ctx, tenantID, "", userID, nil, "", from, to, 1, 0, "", "", "")
 	if err != nil {
@@ -2137,6 +2165,9 @@ func (s *RuntimeServiceImpl) CountMyApplications(ctx context.Context, actor Acto
 
 // TerminateProcessInstance 终止流程实例并归档到历史表
 func (s *RuntimeServiceImpl) TerminateProcessInstance(ctx context.Context, actor Actor, processInstanceID, reason string) error {
+	// 保持 bindActor，不可换 bindActorAPI：驳回级联（node_topology）与失败级联
+	// （create_task_aspect）以驳回人/触发人身份携 CallingModeInternal 进入，
+	// TerminateInTx 的属主豁免依赖内部模式，降级会误拦这两条级联。
 	ctx = bindActor(ctx, actor)
 	if processInstanceID == "" {
 		return fmt.Errorf("process instance ID cannot be empty")

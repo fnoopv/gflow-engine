@@ -36,6 +36,9 @@ func requireInstanceOwnerAuthorized(ctx context.Context, instance *model.WfInsta
 // 任务归属人（assignee）、管理员或系统身份。无操作人、或任务未指派给当前操作人
 // 的任务一律拒绝（fail-closed）。带 assignee 的任务仅其本人（或管理员/系统）可改；
 // 未指派任务仅管理员/系统可改。
+//
+// 无 CallingModeInternal 豁免：引擎内部没有改任务属性的级联路径，
+// 内部 ctx 带真实用户进来即宿主误用，按规则照常判定。
 func requireTaskOperatorAuthorized(ctx context.Context, task *model.WfTask) error {
 	u := GetUserFromCtx(ctx)
 	if u == nil || u.UserID == "" {

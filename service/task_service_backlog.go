@@ -19,10 +19,10 @@ type BacklogItem struct {
 // 单条 GROUP BY 聚合 + 单条批量取 processName，共 2 条 SQL。
 func (s *TaskServiceImpl) GetBacklogByProcess(ctx context.Context, actor Actor) ([]*BacklogItem, error) {
 	ctx = bindActor(ctx, actor)
-	tenantID := actor.TenantID
-	if tenantID == "" {
-		return nil, fmt.Errorf("tenant ID cannot be empty")
+	if err := requireNonEmptyTenantForRealUser(&actor); err != nil {
+		return nil, err
 	}
+	tenantID := actor.TenantID
 
 	rows, err := s.taskDAO.AggregateActiveByProcess(ctx, tenantID, 10)
 	if err != nil {
