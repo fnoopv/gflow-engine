@@ -1605,7 +1605,12 @@ func (s *RuntimeServiceImpl) RestoreAllProcessInstances(ctx context.Context, act
 // 成因：审批事务已提交（任务 Completed）但 post-commit 的引擎推进失败
 // （客户端断连/DB 瞬断等）——任务没了、实例还 active、无待办可操作。
 // 本方法为对账巡检与管理端救援提供发现能力。
-func (s *RuntimeServiceImpl) GetStuckProcessInstances(ctx context.Context, tenantID string) ([]*model.WfInstance, error) {
+func (s *RuntimeServiceImpl) GetStuckProcessInstances(ctx context.Context, actor Actor) ([]*model.WfInstance, error) {
+	ctx = bindActor(ctx, actor)
+	tenantID, err := requireInspectionTenant(&actor)
+	if err != nil {
+		return nil, err
+	}
 	db := s.instanceDAO.Query.WfInstance.UnderlyingDB().WithContext(ctx)
 	q := db.Table("wf_instance as i").
 		Select("i.*").
@@ -1633,7 +1638,12 @@ const expiredDelayGracePeriod = 60 * time.Second
 // delay 计时器活在驱动它的副本进程内，副本崩溃后任务行停在未终态；due_date
 // 早于当前时间减宽限期即视为计时器丢失。引擎建的 delay 行无办理人、初始即
 // Pending，Active/Pending 一并纳入。
-func (s *RuntimeServiceImpl) GetExpiredDelayTasks(ctx context.Context, tenantID string) ([]*model.WfTask, error) {
+func (s *RuntimeServiceImpl) GetExpiredDelayTasks(ctx context.Context, actor Actor) ([]*model.WfTask, error) {
+	ctx = bindActor(ctx, actor)
+	tenantID, err := requireInspectionTenant(&actor)
+	if err != nil {
+		return nil, err
+	}
 	db := s.taskDAO.Query.WfTask.UnderlyingDB().WithContext(ctx)
 	q := db.Table("wf_task").
 		Where("task_type = ?", constants.TaskTypeDelay).
@@ -1827,10 +1837,11 @@ func (s *RuntimeServiceImpl) GetProcessInstanceList(ctx context.Context, actor A
 	if request == nil {
 		request = &dto.ProcessInstanceQueryDTO{}
 	}
-	// 强制以 actor 租户为查询范围；空租户视为系统视角，不做租户过滤
-	if u := GetUserFromCtx(ctx); u != nil && u.TenantID != "" {
-		request.TenantID = u.TenantID
+	// 强制以 actor 租户为查询范围：系统身份空租户＝平台级扫描，非系统空租户 fail-closed。
+	if err := requireNonEmptyTenantForRealUser(&actor); err != nil {
+		return nil, 0, err
 	}
+	request.TenantID = actor.TenantID
 	var (
 		instances []*model.WfInstance
 		total     int64
@@ -1859,10 +1870,11 @@ func (s *RuntimeServiceImpl) GetProcessInstanceUnionList(ctx context.Context, ac
 	if request == nil {
 		request = &dto.ProcessInstanceQueryDTO{}
 	}
-	// 强制以 actor 租户为查询范围；空租户视为系统视角，不做租户过滤
-	if u := GetUserFromCtx(ctx); u != nil && u.TenantID != "" {
-		request.TenantID = u.TenantID
+	// 强制以 actor 租户为查询范围：系统身份空租户＝平台级扫描，非系统空租户 fail-closed。
+	if err := requireNonEmptyTenantForRealUser(&actor); err != nil {
+		return nil, 0, err
 	}
+	request.TenantID = actor.TenantID
 	size := request.GetPageSize()
 	offset := (request.GetPage() - 1) * size
 	instances, total, err := s.instanceDAO.GetInstancesUnionPagination(ctx, request.TenantID, request.ProcessID, "", request.Status, request.Keyword, nil, nil, size, offset, request.InstanceID, request.BusinessKey, "")
@@ -1879,8 +1891,18 @@ func (s *RuntimeServiceImpl) UpdateInstanceCurrentActivity(ctx context.Context, 
 	return s.instanceDAO.SetCurrentActivity(ctx, processInstanceID, activityKey)
 }
 
-// GetProcessInstancesByTaskConditions 基于任务条件关联查询流程实例列表
-func (s *RuntimeServiceImpl) GetProcessInstancesByTaskConditions(ctx context.Context, req *dto.TaskQuery) ([]*model.WfInstance, int64, error) {
+// GetProcessInstancesByTaskConditions 基于任务条件关联查询流程实例列表。
+// 租户强制取自操作人 actor（而非调用方透传的 TaskQuery.TenantID），防止调用方
+// 自填/空租户透传造成跨租户数据泄露——ListByTaskConditions 对空租户不设过滤。
+func (s *RuntimeServiceImpl) GetProcessInstancesByTaskConditions(ctx context.Context, actor Actor, req *dto.TaskQuery) ([]*model.WfInstance, int64, error) {
+	ctx = bindActor(ctx, actor)
+	if req == nil {
+		return nil, 0, fmt.Errorf("task query cannot be nil")
+	}
+	if err := requireNonEmptyTenantForRealUser(&actor); err != nil {
+		return nil, 0, err
+	}
+	req.TenantID = actor.TenantID
 	return s.instanceDAO.ListByTaskConditions(ctx, req)
 }
 
@@ -1891,6 +1913,9 @@ func (s *RuntimeServiceImpl) GetProcessInstancesByTaskConditions(ctx context.Con
 // 列入过滤只会经 ListByTaskConditions 的历史分支把已结束实例捞回待办。
 func (s *RuntimeServiceImpl) GetTodoProcessInstanceList(ctx context.Context, actor Actor, page, pageSize int, keyword string, startUserIDs []string, orderBy string, orderDesc bool) ([]*model.WfInstance, int64, error) {
 	ctx = bindActor(ctx, actor)
+	if err := requireNonEmptyTenantForRealUser(&actor); err != nil {
+		return nil, 0, err
+	}
 	userID, tenantID := actor.UserID, actor.TenantID
 	q := &dto.TaskQuery{
 		Assignee:         userID,
@@ -1928,7 +1953,7 @@ func (s *RuntimeServiceImpl) isUserCandidate(ctx context.Context, task *model.Wf
 	if task == nil || task.TaskDefKey == "" || task.ProcessInstanceID == nil || *task.ProcessInstanceID == "" || userID == "" {
 		return true
 	}
-	candidates, err := s.workflowEngine.GetTaskService().GetTaskCandidates(ctx, *task.ProcessInstanceID, task.TaskDefKey)
+	candidates, err := s.workflowEngine.GetTaskService().GetTaskCandidates(ctx, ActorFromCtx(ctx), *task.ProcessInstanceID, task.TaskDefKey)
 	if err != nil {
 		// 展开失败按非候选处理（fail-closed）：与认领校验同口径，
 		// identity 不可用时不能把候选实例当空池对全租户放行。
@@ -1951,6 +1976,9 @@ func (s *RuntimeServiceImpl) isUserCandidate(ctx context.Context, task *model.Wf
 // instanceStatus 实例状态筛选桶（active/completed/rejected/withdrawn），空为不过滤。
 func (s *RuntimeServiceImpl) GetDoneProcessInstanceList(ctx context.Context, actor Actor, page, pageSize int, keyword string, startUserIDs []string, orderBy string, orderDesc bool, instanceStatus string) ([]*model.WfInstance, int64, error) {
 	ctx = bindActor(ctx, actor)
+	if err := requireNonEmptyTenantForRealUser(&actor); err != nil {
+		return nil, 0, err
+	}
 	userID, tenantID := actor.UserID, actor.TenantID
 	q := &dto.TaskQuery{
 		Assignee:     userID,
@@ -2049,6 +2077,9 @@ func (s *RuntimeServiceImpl) CountDoneByBuckets(ctx context.Context, actor Actor
 // GetCcProcessInstanceList 获取抄送给我的实例列表
 func (s *RuntimeServiceImpl) GetCcProcessInstanceList(ctx context.Context, actor Actor, page, pageSize int, keyword string, startUserIDs []string, orderBy string, orderDesc bool) ([]*model.WfInstance, int64, error) {
 	ctx = bindActor(ctx, actor)
+	if err := requireNonEmptyTenantForRealUser(&actor); err != nil {
+		return nil, 0, err
+	}
 	userID, tenantID := actor.UserID, actor.TenantID
 	q := &dto.TaskQuery{
 		Assignee:     userID,
@@ -2075,6 +2106,9 @@ func (s *RuntimeServiceImpl) GetCcProcessInstanceList(ctx context.Context, actor
 // GetMyApplicationsProcessInstanceList 获取我发起的申请实例列表（按 start_user_id=发起人用户ID 过滤，与 token userId 同口径）
 func (s *RuntimeServiceImpl) GetMyApplicationsProcessInstanceList(ctx context.Context, actor Actor, page, pageSize int, keyword, orderBy string, orderDesc bool, instanceStatus string) ([]*model.WfInstance, int64, error) {
 	ctx = bindActor(ctx, actor)
+	if err := requireNonEmptyTenantForRealUser(&actor); err != nil {
+		return nil, 0, err
+	}
 	userID, tenantID := actor.UserID, actor.TenantID
 	if page <= 0 {
 		page = 1

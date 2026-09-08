@@ -129,7 +129,7 @@ func TestGetExpiredDelayTasks_Filters(t *testing.T) {
 	require.NoError(t, dao.NewTaskDAOWithQuery(q).Update(context.Background(),
 		&model.WfTask{ID: "t-other-tenant", TenantID: "t2"}))
 
-	got, err := rs.GetExpiredDelayTasks(context.Background(), "t1")
+	got, err := rs.GetExpiredDelayTasks(context.Background(), Actor{UserID: "admin", UserName: "admin", TenantID: "t1", SuperAdmin: true})
 	require.NoError(t, err)
 	ids := make([]string, 0, len(got))
 	for _, task := range got {
@@ -137,10 +137,17 @@ func TestGetExpiredDelayTasks_Filters(t *testing.T) {
 	}
 	assert.ElementsMatch(t, []string{"t-expired", "t-expired-active"}, ids)
 
-	// 空租户 = 全租户视角
-	all, err := rs.GetExpiredDelayTasks(context.Background(), "")
+	// 系统身份 + 空租户 = 平台级全租户视角
+	all, err := rs.GetExpiredDelayTasks(context.Background(), SystemActor())
 	require.NoError(t, err)
 	assert.Len(t, all, 3)
+
+	// 非管理员/非系统身份被拒（横向越权防护）
+	_, err = rs.GetExpiredDelayTasks(context.Background(), Actor{UserID: "eve", TenantID: "t1"})
+	require.ErrorIs(t, err, ErrPermissionDenied)
+	// 管理员但空租户被拒（管理员仅能巡本租户，跨租户巡检仅限系统身份）
+	_, err = rs.GetExpiredDelayTasks(context.Background(), Actor{UserID: "admin", SuperAdmin: true})
+	require.ErrorIs(t, err, ErrValidation)
 }
 
 // 参数与状态守卫：空 ID / 不存在 / 非 delay / 已终态 / 未到期 / 实例非 active /

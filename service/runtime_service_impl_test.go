@@ -14,6 +14,7 @@ import (
 	"github.com/rulego/gflow-engine/dao"
 	"github.com/rulego/gflow-engine/model"
 	"github.com/rulego/gflow-engine/query"
+	"github.com/rulego/gflow-engine/types/dto"
 	"github.com/rulego/gflow-engine/types/enums"
 )
 
@@ -245,8 +246,25 @@ func TestRuntimeServiceImpl_ExecuteNext_NilDAO_Panics(t *testing.T) {
 func TestRuntimeServiceImpl_GetProcessInstanceList_NilDAO_Panics(t *testing.T) {
 	s := &RuntimeServiceImpl{}
 	expectPanicRuntime(t, "GetProcessInstanceList", func() {
-		s.GetProcessInstanceList(context.Background(), Actor{}, nil)
+		s.GetProcessInstanceList(context.Background(), Actor{UserID: "u1", TenantID: "t1"}, nil)
 	})
+}
+
+// 空租户的真实用户列表查询应 fail-closed（不再退化为跨租户全量），不会触达 DAO。
+func TestRuntimeServiceImpl_GetProcessInstanceList_EmptyTenantDenied(t *testing.T) {
+	s := &RuntimeServiceImpl{}
+	_, _, err := s.GetProcessInstanceList(context.Background(), Actor{UserID: "u1"}, nil)
+	require.ErrorIs(t, err, ErrValidation)
+}
+
+// GetProcessInstancesByTaskConditions 的入口守卫：nil 请求明确报错；非系统空租户
+// fail-closed（不再透传调用方 TaskQuery.TenantID 造成跨租户）。
+func TestRuntimeServiceImpl_GetProcessInstancesByTaskConditions_Guards(t *testing.T) {
+	s := &RuntimeServiceImpl{}
+	_, _, err := s.GetProcessInstancesByTaskConditions(context.Background(), Actor{UserID: "u1", TenantID: "t1"}, nil)
+	require.Error(t, err)
+	_, _, err = s.GetProcessInstancesByTaskConditions(context.Background(), Actor{UserID: "u1"}, &dto.TaskQuery{})
+	require.ErrorIs(t, err, ErrValidation)
 }
 
 // ---------------------------------------------------------------------------

@@ -30,8 +30,9 @@ func (s *TaskServiceImpl) GetTaskVariables(ctx context.Context, actor Actor, tas
 		return nil, fmt.Errorf("%w: task", ErrNotFound)
 	}
 
-	// 租户校验：actor 租户非空时任务必须同租户（跨租户按不存在处理，不泄露任务存在性）
-	if u := GetUserFromCtx(ctx); u != nil && u.TenantID != "" && task.TenantID != u.TenantID {
+	// 租户校验：非系统操作人必须与任务同租户（真实用户空租户 fail-closed；系统身份/
+	// 无身份放行），跨租户按不存在处理，不泄露任务存在性。
+	if u := GetUserFromCtx(ctx); u != nil && !IsSystemActor(u) && task.TenantID != u.TenantID {
 		return nil, fmt.Errorf("%w: task", ErrNotFound)
 	}
 
