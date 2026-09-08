@@ -300,7 +300,7 @@ func TestGetTaskCandidates_RoleExpanded(t *testing.T) {
 	taskSvc := newCandSvc(q, identity)
 	require.NoError(t, taskSvc.AddCandidates(ctx, Actor{UserID: "system", TenantID: "t1"}, "task-cand", "role", []string{"role-a"}))
 
-	candidates, err := taskSvc.GetTaskCandidates(ctx, Actor{UserID: "tester", TenantID: "t1"}, "inst-cand", "approve-node")
+	candidates, err := taskSvc.GetTaskCandidates(ctx, Actor{UserID: "tester", TenantID: "t1", WorkflowAdmin: true}, "inst-cand", "approve-node")
 	require.NoError(t, err)
 	require.NotEmpty(t, candidates, "role 任务候选展开后应非空")
 
@@ -324,11 +324,11 @@ func TestGetTaskCandidates_IdentityNil(t *testing.T) {
 	require.NoError(t, taskSvc.AddCandidates(ctx, Actor{UserID: "system", TenantID: "t1"}, "task-mix", "role", []string{"role-a"}))
 	require.NoError(t, taskSvc.AddCandidates(ctx, Actor{UserID: "system", TenantID: "t1"}, "task-mix", "person", []string{"p1"}))
 
-	_, err := taskSvc.GetTaskCandidates(ctx, Actor{UserID: "tester", TenantID: "t1"}, "inst-mix", "approve-node")
+	_, err := taskSvc.GetTaskCandidates(ctx, Actor{UserID: "tester", TenantID: "t1", WorkflowAdmin: true}, "inst-mix", "approve-node")
 	require.Error(t, err, "identity 缺失且池含 role 实体时必须报错")
 
 	require.NoError(t, taskSvc.RemoveCandidates(ctx, Actor{UserID: "system", TenantID: "t1"}, "task-mix", "role", []string{"role-a"}))
-	candidates, err := taskSvc.GetTaskCandidates(ctx, Actor{UserID: "tester", TenantID: "t1"}, "inst-mix", "approve-node")
+	candidates, err := taskSvc.GetTaskCandidates(ctx, Actor{UserID: "tester", TenantID: "t1", WorkflowAdmin: true}, "inst-mix", "approve-node")
 	require.NoError(t, err)
 	require.Len(t, candidates, 1, "纯 person 池不依赖 identity")
 	require.Equal(t, "p1", candidates[0].EntityID)

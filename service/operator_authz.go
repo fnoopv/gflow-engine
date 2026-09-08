@@ -96,7 +96,7 @@ func requireTaskOperatorAuthorized(ctx context.Context, task *model.WfTask) erro
 
 // requireAdminIdentity 校验操作人为工作流管理员（Actor.WorkflowAdmin）或系统身份。
 // 用于跳过 assignee/候选人校验的强制改派类管理操作（Reassign/SetAssignee/SetOwner）
-// 与流程定义变更类操作（Update/Delete/Activate/UpdateStatus）：
+// 与流程定义变更类操作（Deploy/Create/Update/Delete/Activate/UpdateStatus）：
 // 这些操作绕过"仅本人可操作"语义，引擎内部无其他鉴权点，必须在入口强制校验，
 // 否则任意同租户用户可拿到 taskID 即劫持他人任务。
 //

@@ -291,7 +291,7 @@ func (e *e2eTestEnv) deployRawProcess(processKey, chainAlias, name string, def m
 	require.NoError(e.t, err, "marshal def")
 
 	ctx := e.userCtx("admin")
-	_, err = e.engine.GetProcessService().Deploy(ctx, service.Actor{UserID: "admin", TenantID: e2eTenantID}, &model.WfProcess{
+	_, err = e.engine.GetProcessService().Deploy(ctx, service.Actor{UserID: "admin", TenantID: e2eTenantID, WorkflowAdmin: true}, &model.WfProcess{
 		ProcessKey:     processKey,
 		Name:           name,
 		DefinitionJSON: string(raw),

@@ -342,7 +342,7 @@ func (e *e2eTestEnv) deploySimpleProcess(processKey, name, approvalType string, 
 	require.NoError(e.t, err, "marshal def")
 
 	ctx := e.userCtx("admin")
-	_, err = e.engine.GetProcessService().Deploy(ctx, service.Actor{UserID: "admin", TenantID: e2eTenantID}, &model.WfProcess{
+	_, err = e.engine.GetProcessService().Deploy(ctx, service.Actor{UserID: "admin", TenantID: e2eTenantID, WorkflowAdmin: true}, &model.WfProcess{
 		ProcessKey:     processKey,
 		Name:           name,
 		DefinitionJSON: string(raw),
@@ -661,7 +661,7 @@ func (e *e2eTestEnv) deployConditionalSwitchProcess(processKey string) {
 	}
 	raw, _ := json.Marshal(def)
 	ctx := e.userCtx("admin")
-	_, err := e.engine.GetProcessService().Deploy(ctx, service.Actor{UserID: "admin", TenantID: e2eTenantID}, &model.WfProcess{
+	_, err := e.engine.GetProcessService().Deploy(ctx, service.Actor{UserID: "admin", TenantID: e2eTenantID, WorkflowAdmin: true}, &model.WfProcess{
 		ProcessKey:     processKey,
 		Name:           processKey,
 		DefinitionJSON: string(raw),
@@ -1079,7 +1079,7 @@ func (e *e2eTestEnv) deployOrThenSingleProcess(processKey, name string, orApprov
 	require.NoError(e.t, err, "marshal def")
 
 	ctx := e.userCtx("admin")
-	_, err = e.engine.GetProcessService().Deploy(ctx, service.Actor{UserID: "admin", TenantID: e2eTenantID}, &model.WfProcess{
+	_, err = e.engine.GetProcessService().Deploy(ctx, service.Actor{UserID: "admin", TenantID: e2eTenantID, WorkflowAdmin: true}, &model.WfProcess{
 		ProcessKey:     processKey,
 		Name:           name,
 		DefinitionJSON: string(raw),
@@ -1356,7 +1356,7 @@ func (e *e2eTestEnv) deployLinearTwoStepProcess(processKey, name string, firstAp
 	raw, err := json.Marshal(def)
 	require.NoError(e.t, err, "marshal linear two-step def")
 	ctx := e.userCtx("admin")
-	_, err = e.engine.GetProcessService().Deploy(ctx, service.Actor{UserID: "admin", TenantID: e2eTenantID}, &model.WfProcess{
+	_, err = e.engine.GetProcessService().Deploy(ctx, service.Actor{UserID: "admin", TenantID: e2eTenantID, WorkflowAdmin: true}, &model.WfProcess{
 		ProcessKey:     processKey,
 		Name:           name,
 		DefinitionJSON: string(raw),
@@ -1540,7 +1540,7 @@ func (e *e2eTestEnv) deployLinearThreeStepProcess(processKey, name string, appro
 	raw, err := json.Marshal(def)
 	require.NoError(e.t, err, "marshal linear three-step def")
 	ctx := e.userCtx("admin")
-	_, err = e.engine.GetProcessService().Deploy(ctx, service.Actor{UserID: "admin", TenantID: e2eTenantID}, &model.WfProcess{
+	_, err = e.engine.GetProcessService().Deploy(ctx, service.Actor{UserID: "admin", TenantID: e2eTenantID, WorkflowAdmin: true}, &model.WfProcess{
 		ProcessKey:     processKey,
 		Name:           name,
 		DefinitionJSON: string(raw),

@@ -187,7 +187,7 @@ func (e *miEnv) deployForkJoin(processKey string) {
 	raw, err := json.Marshal(def)
 	require.NoError(e.t, err)
 	_, err = e.replicaA.GetProcessService().Deploy(context.Background(),
-		service.Actor{UserID: "admin", TenantID: miTenantID},
+		service.Actor{UserID: "admin", TenantID: miTenantID, WorkflowAdmin: true},
 		&model.WfProcess{ProcessKey: processKey, Name: processKey, DefinitionJSON: string(raw),
 			Status: string(enums.ProcessStatusActive), TenantID: miTenantID, CreatedBy: "admin"}, true)
 	require.NoError(e.t, err, "deploy fork/join process")

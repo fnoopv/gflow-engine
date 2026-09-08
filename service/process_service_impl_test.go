@@ -32,7 +32,7 @@ func expectPanic(t *testing.T, name string, fn func()) {
 
 func TestProcessServiceImpl_Deploy_EmptyName(t *testing.T) {
 	s := newProcessServiceImplForTest()
-	_, err := s.Deploy(context.Background(), Actor{UserID: "tester", TenantID: "t1"}, &model.WfProcess{
+	_, err := s.Deploy(context.Background(), Actor{UserID: "tester", TenantID: "t1", WorkflowAdmin: true}, &model.WfProcess{
 		ProcessKey: "key1",
 		TenantID:   "t1",
 	}, false)
@@ -43,7 +43,7 @@ func TestProcessServiceImpl_Deploy_EmptyName(t *testing.T) {
 
 func TestProcessServiceImpl_Deploy_EmptyProcessKey(t *testing.T) {
 	s := newProcessServiceImplForTest()
-	_, err := s.Deploy(context.Background(), Actor{UserID: "tester", TenantID: "t1"}, &model.WfProcess{
+	_, err := s.Deploy(context.Background(), Actor{UserID: "tester", TenantID: "t1", WorkflowAdmin: true}, &model.WfProcess{
 		Name:     "Test",
 		TenantID: "t1",
 	}, false)
@@ -54,7 +54,7 @@ func TestProcessServiceImpl_Deploy_EmptyProcessKey(t *testing.T) {
 
 func TestProcessServiceImpl_Deploy_EmptyTenantID(t *testing.T) {
 	s := newProcessServiceImplForTest()
-	_, err := s.Deploy(context.Background(), Actor{UserID: "tester", TenantID: "t1"}, &model.WfProcess{
+	_, err := s.Deploy(context.Background(), Actor{UserID: "tester", TenantID: "t1", WorkflowAdmin: true}, &model.WfProcess{
 		Name:       "Test",
 		ProcessKey: "key1",
 	}, false)
@@ -66,7 +66,7 @@ func TestProcessServiceImpl_Deploy_EmptyTenantID(t *testing.T) {
 func TestProcessServiceImpl_Deploy_NilDAO_Panics(t *testing.T) {
 	s := &ProcessServiceImpl{}
 	expectPanic(t, "Deploy", func() {
-		s.Deploy(context.Background(), Actor{UserID: "tester", TenantID: "t1"}, &model.WfProcess{
+		s.Deploy(context.Background(), Actor{UserID: "tester", TenantID: "t1", WorkflowAdmin: true}, &model.WfProcess{
 			Name:           "Test",
 			ProcessKey:     "key1",
 			TenantID:       "t1",
@@ -78,7 +78,7 @@ func TestProcessServiceImpl_Deploy_NilDAO_Panics(t *testing.T) {
 func TestProcessServiceImpl_Deploy_Duplicate_NilDAO_Panics(t *testing.T) {
 	s := &ProcessServiceImpl{}
 	expectPanic(t, "Deploy(duplicate)", func() {
-		s.Deploy(context.Background(), Actor{UserID: "tester", TenantID: "t1"}, &model.WfProcess{
+		s.Deploy(context.Background(), Actor{UserID: "tester", TenantID: "t1", WorkflowAdmin: true}, &model.WfProcess{
 			Name:           "Test",
 			ProcessKey:     "key1",
 			TenantID:       "t1",
@@ -96,7 +96,7 @@ func TestProcessServiceImpl_Create_InvalidDSL(t *testing.T) {
 		"not json":    "not-json",
 		"broken json": `{"ruleChain":`,
 	} {
-		_, err := s.Create(context.Background(), Actor{UserID: "tester", TenantID: "t1"}, &model.WfProcess{
+		_, err := s.Create(context.Background(), Actor{UserID: "tester", TenantID: "t1", WorkflowAdmin: true}, &model.WfProcess{
 			Name:           "Test",
 			ProcessKey:     "key1",
 			TenantID:       "t1",
@@ -114,7 +114,7 @@ func TestProcessServiceImpl_Create_InvalidDSL(t *testing.T) {
 
 func TestProcessServiceImpl_Create_EmptyName(t *testing.T) {
 	s := newProcessServiceImplForTest()
-	_, err := s.Create(context.Background(), Actor{UserID: "tester", TenantID: "t1"}, &model.WfProcess{
+	_, err := s.Create(context.Background(), Actor{UserID: "tester", TenantID: "t1", WorkflowAdmin: true}, &model.WfProcess{
 		ProcessKey: "key1",
 		TenantID:   "t1",
 	}, false)
@@ -125,7 +125,7 @@ func TestProcessServiceImpl_Create_EmptyName(t *testing.T) {
 
 func TestProcessServiceImpl_Create_EmptyProcessKey(t *testing.T) {
 	s := newProcessServiceImplForTest()
-	_, err := s.Create(context.Background(), Actor{UserID: "tester", TenantID: "t1"}, &model.WfProcess{
+	_, err := s.Create(context.Background(), Actor{UserID: "tester", TenantID: "t1", WorkflowAdmin: true}, &model.WfProcess{
 		Name:     "Test",
 		TenantID: "t1",
 	}, false)
@@ -136,7 +136,7 @@ func TestProcessServiceImpl_Create_EmptyProcessKey(t *testing.T) {
 
 func TestProcessServiceImpl_Create_EmptyTenantID(t *testing.T) {
 	s := newProcessServiceImplForTest()
-	_, err := s.Create(context.Background(), Actor{UserID: "tester", TenantID: "t1"}, &model.WfProcess{
+	_, err := s.Create(context.Background(), Actor{UserID: "tester", TenantID: "t1", WorkflowAdmin: true}, &model.WfProcess{
 		Name:       "Test",
 		ProcessKey: "key1",
 	}, false)
@@ -147,7 +147,7 @@ func TestProcessServiceImpl_Create_EmptyTenantID(t *testing.T) {
 
 func TestProcessServiceImpl_Update_EmptyID(t *testing.T) {
 	s := newProcessServiceImplForTest()
-	err := s.Update(context.Background(), Actor{UserID: "tester", TenantID: "t1"}, &model.WfProcess{Name: "Test"})
+	err := s.Update(context.Background(), Actor{UserID: "tester", TenantID: "t1", WorkflowAdmin: true}, &model.WfProcess{Name: "Test"})
 	if err == nil {
 		t.Error("expected error for empty ID")
 	}
@@ -216,6 +216,7 @@ func TestProcessServiceImpl_Retire_NilDAO_Panics(t *testing.T) {
 func TestProcessServiceImpl_DefinitionMutations_RequireAdmin(t *testing.T) {
 	s := &ProcessServiceImpl{}
 	nonAdmin := Actor{UserID: "eve", TenantID: "t1"}
+	deployable := &model.WfProcess{Name: "n", ProcessKey: "k", TenantID: "t1"}
 	cases := []struct {
 		name string
 		fn   func() error
@@ -226,6 +227,8 @@ func TestProcessServiceImpl_DefinitionMutations_RequireAdmin(t *testing.T) {
 		{"Activate", func() error { _, err := s.Activate(context.Background(), nonAdmin, "proc-1"); return err }},
 		{"UpdateStatus", func() error { return s.UpdateStatus(context.Background(), nonAdmin, "proc-1", "active") }},
 		{"UpdateStatusByKey", func() error { return s.UpdateStatusByKey(context.Background(), nonAdmin, "key1", "active") }},
+		{"Deploy", func() error { _, err := s.Deploy(context.Background(), nonAdmin, deployable, true); return err }},
+		{"Create", func() error { _, err := s.Create(context.Background(), nonAdmin, deployable, true); return err }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

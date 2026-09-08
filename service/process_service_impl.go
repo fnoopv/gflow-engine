@@ -52,6 +52,11 @@ func NewProcessServiceWithQuery(query *query.Query, workflowEngine WorkflowEngin
 // Create 创建
 func (s *ProcessServiceImpl) Create(ctx context.Context, actor Actor, process *model.WfProcess, duplicate bool) (*model.WfProcess, error) {
 	ctx = bindActor(ctx, actor)
+	// 管理员门槛：新增流程定义（草稿）属租户级共享资源变更，仅管理员或系统身份；
+	// 与 Deploy/Update/Delete 同口径，堵住经同 key 新版本/草稿绕开 Update 门槛的路径。
+	if err := requireAdminIdentity(&actor); err != nil {
+		return nil, err
+	}
 	return s.create(ctx, process, duplicate, string(enums.ProcessStatusDraft))
 }
 
@@ -162,6 +167,12 @@ func (s *ProcessServiceImpl) Update(ctx context.Context, actor Actor, process *m
 // Deploy 部署流程定义
 func (s *ProcessServiceImpl) Deploy(ctx context.Context, actor Actor, process *model.WfProcess, duplicate bool) (*model.WfProcess, error) {
 	ctx = bindActor(ctx, actor)
+	// 管理员门槛：部署生成新版本并退役同 key 旧 active，与 Update 一样影响后续所有
+	// 发起，仅管理员或系统身份。duplicate=false 的幂等返回路径同门槛——Deploy 是
+	// 管理操作，普通用户的可见性走 List/Get。
+	if err := requireAdminIdentity(&actor); err != nil {
+		return nil, err
+	}
 	return s.create(ctx, process, duplicate, string(enums.ProcessStatusActive))
 }
 

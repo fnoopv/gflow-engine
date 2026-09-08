@@ -123,7 +123,7 @@ func TestProcessServiceImpl_Deploy_BadCondition_Rejected(t *testing.T) {
 	dsl := strings.Replace(validSwitchDSL,
 		`"case": "msg.amount >= 10000"`, `"case": "msg.amount !contains 'x'"`, 1)
 
-	_, err := s.Deploy(context.Background(), Actor{UserID: "tester", TenantID: "t1"}, &model.WfProcess{
+	_, err := s.Deploy(context.Background(), Actor{UserID: "tester", TenantID: "t1", WorkflowAdmin: true}, &model.WfProcess{
 		Name:           "Test",
 		ProcessKey:     "key1",
 		TenantID:       "t1",

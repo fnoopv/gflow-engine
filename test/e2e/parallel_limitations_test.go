@@ -88,7 +88,7 @@ func (e *e2eTestEnv) deployForkJoinWithMergeMap(processKey, assigneeA, assigneeB
 	raw, err := json.Marshal(def)
 	require.NoError(e.t, err, "marshal fork/join def with mergeToMap")
 	ctx := e.userCtx("admin")
-	_, err = e.engine.GetProcessService().Deploy(ctx, service.Actor{UserID: "admin", TenantID: e2eTenantID}, &model.WfProcess{
+	_, err = e.engine.GetProcessService().Deploy(ctx, service.Actor{UserID: "admin", TenantID: e2eTenantID, WorkflowAdmin: true}, &model.WfProcess{
 		ProcessKey:     processKey,
 		Name:           processKey,
 		DefinitionJSON: string(raw),
@@ -159,7 +159,7 @@ func (e *e2eTestEnv) deployForkJoinSerialUserTasks(processKey, assigneeA1, assig
 	raw, err := json.Marshal(def)
 	require.NoError(e.t, err, "marshal serial userTasks def")
 	ctx := e.userCtx("admin")
-	_, err = e.engine.GetProcessService().Deploy(ctx, service.Actor{UserID: "admin", TenantID: e2eTenantID}, &model.WfProcess{
+	_, err = e.engine.GetProcessService().Deploy(ctx, service.Actor{UserID: "admin", TenantID: e2eTenantID, WorkflowAdmin: true}, &model.WfProcess{
 		ProcessKey:     processKey,
 		Name:           processKey,
 		DefinitionJSON: string(raw),

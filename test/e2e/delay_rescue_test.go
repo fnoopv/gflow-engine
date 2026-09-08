@@ -56,7 +56,7 @@ func (e *e2eTestEnv) deployDelayProcess(processKey, delayMs string, prependStart
 	raw, err := json.Marshal(def)
 	require.NoError(e.t, err, "marshal def")
 	ctx := e.userCtx("admin")
-	_, err = e.engine.GetProcessService().Deploy(ctx, service.Actor{UserID: "admin", TenantID: e2eTenantID}, &model.WfProcess{
+	_, err = e.engine.GetProcessService().Deploy(ctx, service.Actor{UserID: "admin", TenantID: e2eTenantID, WorkflowAdmin: true}, &model.WfProcess{
 		ProcessKey:     processKey,
 		Name:           processKey,
 		DefinitionJSON: string(raw),
