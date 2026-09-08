@@ -83,8 +83,10 @@ func (s *TaskServiceImpl) collectCandidateMembersExcluding(ctx context.Context, 
 }
 
 // GetTaskCandidates 获取任务候选人：读 wf_task_assignee 展开 role/dept 候选。
-// tenantID 从查询的实例/任务上无法可靠拿到，这里按实例内任意一条任务取 tenantID（同实例同节点任务租户一致）。
-func (s *TaskServiceImpl) GetTaskCandidates(ctx context.Context, processInstanceID, taskDefKey string) ([]*dto.NodeApproverDTO, error) {
+// tenantID 从实例/任务推断，并校验调用方租户（跨租户拒绝），防止候选人名单
+// IDOR 泄露审批人员身份。
+func (s *TaskServiceImpl) GetTaskCandidates(ctx context.Context, actor Actor, processInstanceID, taskDefKey string) ([]*dto.NodeApproverDTO, error) {
+	ctx = bindActor(ctx, actor)
 	if taskDefKey == "" || processInstanceID == "" {
 		return nil, fmt.Errorf("taskDefKey and processInstanceID cannot be empty")
 	}
@@ -102,6 +104,12 @@ func (s *TaskServiceImpl) GetTaskCandidates(ctx context.Context, processInstance
 	tenantID := ""
 	if len(tasks) > 0 {
 		tenantID = tasks[0].TenantID
+	}
+	// 租户校验：任务存在时按调用方租户拦截跨租户读取（IDOR 防护）。
+	if tenantID != "" {
+		if err := ensureTenantAccess(ctx, "task", tenantID); err != nil {
+			return nil, err
+		}
 	}
 
 	rows, err := s.taskAssigneeDAO.GetByInstanceAndDefKey(ctx, tenantID, processInstanceID, taskDefKey)
@@ -244,7 +252,8 @@ func nodeApproverFromTask(t *model.WfTask, status string, approvalTime *string, 
 }
 
 // GetNodeApprovalStatus 获取节点审批状态（已审批/待审批名单及审批规则摘要）。
-func (s *TaskServiceImpl) GetNodeApprovalStatus(ctx context.Context, taskID string) (*dto.NodeApprovalStatusDTO, error) {
+func (s *TaskServiceImpl) GetNodeApprovalStatus(ctx context.Context, actor Actor, taskID string) (*dto.NodeApprovalStatusDTO, error) {
+	ctx = bindActor(ctx, actor)
 	if taskID == "" {
 		return nil, fmt.Errorf("taskID cannot be empty")
 	}
@@ -255,6 +264,10 @@ func (s *TaskServiceImpl) GetNodeApprovalStatus(ctx context.Context, taskID stri
 	}
 	if task == nil {
 		return nil, fmt.Errorf("%w: task", ErrNotFound)
+	}
+	// 租户校验：跨租户读取节点审批人名单按拒绝处理（IDOR 防护）
+	if err := ensureTenantAccess(ctx, "task", task.TenantID); err != nil {
+		return nil, err
 	}
 	// orphan/draft 任务没有实例，节点审批状态无从谈起
 	if task.ProcessInstanceID == nil || *task.ProcessInstanceID == "" {
@@ -306,7 +319,7 @@ func (s *TaskServiceImpl) GetNodeApprovalStatus(ctx context.Context, taskID stri
 	// 候选任务（未 claim，无 assignee）：PendingList 用展开后的候选成员展示。
 	if task.Assignee == nil || *task.Assignee == "" {
 		if task.ProcessInstanceID != nil && *task.ProcessInstanceID != "" && task.TaskDefKey != "" {
-			if candidates, cErr := s.GetTaskCandidates(ctx, *task.ProcessInstanceID, task.TaskDefKey); cErr == nil {
+			if candidates, cErr := s.GetTaskCandidates(ctx, actor, *task.ProcessInstanceID, task.TaskDefKey); cErr == nil {
 				for _, c := range candidates {
 					if c == nil || c.EntityID == "" {
 						continue
@@ -343,8 +356,8 @@ func (s *TaskServiceImpl) GetNodeApprovalStatus(ctx context.Context, taskID stri
 }
 
 // GetNodeApprovers 获取节点审批人列表（已审批 + 待审批合并）。
-func (s *TaskServiceImpl) GetNodeApprovers(ctx context.Context, taskID string) ([]*dto.NodeApproverDTO, error) {
-	status, err := s.GetNodeApprovalStatus(ctx, taskID)
+func (s *TaskServiceImpl) GetNodeApprovers(ctx context.Context, actor Actor, taskID string) ([]*dto.NodeApproverDTO, error) {
+	status, err := s.GetNodeApprovalStatus(ctx, actor, taskID)
 	if err != nil {
 		return nil, err
 	}
@@ -357,7 +370,8 @@ func (s *TaskServiceImpl) GetNodeApprovers(ctx context.Context, taskID string) (
 }
 
 // GetNodeApprovalStatusByProcessInstance 根据流程实例和任务定义Key获取节点审批状态。
-func (s *TaskServiceImpl) GetNodeApprovalStatusByProcessInstance(ctx context.Context, processInstanceID, taskDefKey string) (*dto.NodeApprovalStatusDTO, error) {
+func (s *TaskServiceImpl) GetNodeApprovalStatusByProcessInstance(ctx context.Context, actor Actor, processInstanceID, taskDefKey string) (*dto.NodeApprovalStatusDTO, error) {
+	ctx = bindActor(ctx, actor)
 	if processInstanceID == "" || taskDefKey == "" {
 		return nil, fmt.Errorf("processInstanceID and taskDefKey cannot be empty")
 	}
@@ -380,5 +394,10 @@ func (s *TaskServiceImpl) GetNodeApprovalStatusByProcessInstance(ctx context.Con
 		return nil, fmt.Errorf("%w: no active task for process instance %s and task def key %s", ErrNotFound, processInstanceID, taskDefKey)
 	}
 
-	return s.GetNodeApprovalStatus(ctx, tasks[0].ID)
+	// 租户校验：跨租户读取节点审批状态按拒绝处理（IDOR 防护）。
+	if err := ensureTenantAccess(ctx, "task", tasks[0].TenantID); err != nil {
+		return nil, err
+	}
+
+	return s.GetNodeApprovalStatus(ctx, actor, tasks[0].ID)
 }

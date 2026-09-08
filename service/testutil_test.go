@@ -58,10 +58,10 @@ func (r *testRuntimeDouble) GetProcessInstanceUnionList(ctx context.Context, act
 func (r *testRuntimeDouble) UpdateInstanceCurrentActivity(ctx context.Context, id, activityKey string) error {
 	return nil
 }
-func (r *testRuntimeDouble) GetStuckProcessInstances(ctx context.Context, tenantID string) ([]*model.WfInstance, error) {
+func (r *testRuntimeDouble) GetStuckProcessInstances(ctx context.Context, actor Actor) ([]*model.WfInstance, error) {
 	return nil, nil
 }
-func (r *testRuntimeDouble) GetExpiredDelayTasks(ctx context.Context, tenantID string) ([]*model.WfTask, error) {
+func (r *testRuntimeDouble) GetExpiredDelayTasks(ctx context.Context, actor Actor) ([]*model.WfTask, error) {
 	return nil, nil
 }
 func (r *testRuntimeDouble) RescueExpiredDelayTask(ctx context.Context, actor Actor, taskID string) error {
@@ -155,7 +155,7 @@ func (r *testRuntimeDouble) CountMyApplicationsByBuckets(ctx context.Context, ac
 func (r *testRuntimeDouble) CountDoneByBuckets(ctx context.Context, actor Actor, keyword string, startUserIDs []string) (map[string]int64, error) {
 	return nil, nil
 }
-func (r *testRuntimeDouble) GetProcessInstancesByTaskConditions(ctx context.Context, req *dto.TaskQuery) ([]*model.WfInstance, int64, error) {
+func (r *testRuntimeDouble) GetProcessInstancesByTaskConditions(ctx context.Context, actor Actor, req *dto.TaskQuery) ([]*model.WfInstance, int64, error) {
 	return nil, 0, nil
 }
 func (r *testRuntimeDouble) GetProcessInstanceDetail(ctx context.Context, actor Actor, id string) (*dto.InstanceDetailResponse, error) {

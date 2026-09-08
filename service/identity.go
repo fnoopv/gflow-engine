@@ -66,6 +66,34 @@ func requireAdminIdentity(actor *Actor) error {
 	return fmt.Errorf("operation requires admin or system identity: %w", ErrPermissionDenied)
 }
 
+// requireInspectionTenant 校验巡检端点（卡死实例/超期 delay 任务）的操作人身份，
+// 返回巡检租户。仅管理员（SuperAdmin）或系统身份可巡；系统身份空租户＝平台级
+// 全租户扫描（定时巡检跨租户是设计内行为），非系统身份必须携带本租户，杜绝
+// 调用方自定裸 tenantID 越权扫其它租户（原形参 tenantID 为空即全租户）。
+func requireInspectionTenant(actor *Actor) (string, error) {
+	if err := requireAdminIdentity(actor); err != nil {
+		return "", err
+	}
+	if !IsSystemActor(actor) && actor.TenantID == "" {
+		return "", fmt.Errorf("tenant ID required for non-system inspection: %w", ErrValidation)
+	}
+	return actor.TenantID, nil
+}
+
+// requireNonEmptyTenantForRealUser 对非系统身份的空租户 fail-closed。列表/批量只读
+// DAO 遇空租户会跳过租户过滤退化为跨租户全量（与单读 ensureTenantAccess 的空租户
+// 拒绝不一致），故真实用户必须携带租户；系统身份空租户放行（平台级巡检/管理视角
+// 跨租户扫描是设计内行为）。
+func requireNonEmptyTenantForRealUser(actor *Actor) error {
+	if actor == nil {
+		return fmt.Errorf("operator identity required: %w", ErrAuthenticationRequired)
+	}
+	if !IsSystemActor(actor) && actor.TenantID == "" {
+		return fmt.Errorf("tenant ID required: %w", ErrValidation)
+	}
+	return nil
+}
+
 // ActorFromCtx 取 ctx 已绑定操作人，未绑定返回 SystemActor。
 // 供引擎内部回调（aspect/节点/级联）使用，保留原身份可维持租户校验与事件归属。
 func ActorFromCtx(ctx context.Context) Actor {
