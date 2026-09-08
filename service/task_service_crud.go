@@ -133,10 +133,7 @@ func (s *TaskServiceImpl) DeleteTask(ctx context.Context, actor Actor, taskID, r
 		if u := GetUserFromCtx(ctx); u != nil && task.TenantID != u.TenantID {
 			return fmt.Errorf("%w: task", ErrNotFound)
 		}
-		isSuperAdmin := false
-		if u := GetUserFromCtx(ctx); u != nil {
-			isSuperAdmin = u.SuperAdmin
-		}
+		isAdmin := isWorkflowAdmin(GetUserFromCtx(ctx))
 		if task.Assignee != nil && *task.Assignee != "" {
 			// 已分配的任务：只有 assignee 可以删除
 			if *task.Assignee != userID {
@@ -149,7 +146,7 @@ func (s *TaskServiceImpl) DeleteTask(ctx context.Context, actor Actor, taskID, r
 			if err != nil || instance == nil {
 				return fmt.Errorf("cannot verify instance initiator, refuse to delete: %w", ErrPermissionDenied)
 			}
-			if instance.StartUserID != userID && !isSuperAdmin {
+			if !isInstanceStarterOrAdmin(instance, userID, isAdmin) {
 				return fmt.Errorf("only the process initiator or admin can delete unassigned tasks: %w", ErrPermissionDenied)
 			}
 		}

@@ -332,7 +332,7 @@ func (s *TaskServiceImpl) authorizeResolveOperator(ctx context.Context, task *mo
 	if u == nil || u.UserID == "" {
 		return ErrAuthenticationRequired
 	}
-	if u.SuperAdmin || IsSystemActor(u) {
+	if isAdminOrSystem(u) {
 		return nil
 	}
 	if task.Assignee != nil && *task.Assignee == u.UserID {

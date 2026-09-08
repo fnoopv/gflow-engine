@@ -60,7 +60,7 @@ func (s *TaskServiceImpl) Withdraw(ctx context.Context, actor Actor, taskID, rea
 // 此方法按 instanceID 取当前 active 任务，复用 withdrawInternal（含 StartUserID 校验 + 终止实例）。
 func (s *TaskServiceImpl) WithdrawByInstance(ctx context.Context, actor Actor, instanceID, reason string) error {
 	ctx = bindActor(ctx, actor)
-	userID, isSuperAdmin := actor.UserID, actor.SuperAdmin
+	userID, isAdmin := actor.UserID, isWorkflowAdmin(&actor)
 	if instanceID == "" || userID == "" {
 		return fmt.Errorf("instance ID and user ID cannot be empty")
 	}
@@ -83,14 +83,14 @@ func (s *TaskServiceImpl) WithdrawByInstance(ctx context.Context, actor Actor, i
 		if err := s.requireActionEnabled(ctx, tasks[0], "withdraw"); err != nil {
 			return err
 		}
-		return s.withdrawInternal(ctx, scope, tasks[0].ID, userID, reason, isSuperAdmin)
+		return s.withdrawInternal(ctx, scope, tasks[0].ID, userID, reason, isAdmin)
 	})
 }
 
 // withdrawInternal 在已持有实例行锁的事务内执行 Withdraw 实际逻辑。
 // 内部调用 runtimeService 的 TerminateInTx（同样假定持锁）——避免重新进入
 // WithInstanceTx 导致重复 FOR UPDATE 或 savepoint 嵌套。
-func (s *TaskServiceImpl) withdrawInternal(ctx context.Context, scope *InstanceScope, taskID, userID, reason string, isSuperAdmin bool) error {
+func (s *TaskServiceImpl) withdrawInternal(ctx context.Context, scope *InstanceScope, taskID, userID, reason string, isAdmin bool) error {
 	taskDAO := scope.Tasks()
 	hiTaskDAO := scope.HiTasks()
 	task, err := taskDAO.Get(ctx, taskID)
@@ -126,7 +126,7 @@ func (s *TaskServiceImpl) withdrawInternal(ctx context.Context, scope *InstanceS
 	if u := GetUserFromCtx(ctx); u != nil && instance.TenantID != u.TenantID {
 		return fmt.Errorf("%w: process instance", ErrNotFound)
 	}
-	if instance.StartUserID != userID && !isSuperAdmin {
+	if !isInstanceStarterOrAdmin(instance, userID, isAdmin) {
 		return fmt.Errorf("%w: only the process initiator (or admin) can withdraw", ErrPermissionDenied)
 	}
 

@@ -18,7 +18,6 @@ package service
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/rulego/gflow-engine/types/constants"
 )
@@ -48,52 +47,6 @@ func IsSystemActor(a *Actor) bool {
 	return a != nil && a.UserID == constants.UserSystem
 }
 
-// requireAdminIdentity 校验操作人为工作流管理员（Actor.SuperAdmin）或系统身份。
-// 用于跳过 assignee/候选人校验的强制改派类管理操作（Reassign/SetAssignee/SetOwner）：
-// 这些操作绕过"仅本人可操作"语义，引擎内部无其他鉴权点，必须在入口强制校验，
-// 否则任意同租户用户可拿到 taskID 即劫持他人任务。
-//
-// 系统身份（IsSystemActor）放行，供定时巡检/跨服务级联等引擎内部机制使用；
-// 管理员身份由宿主服务端按角色判定后置 SuperAdmin 标记（该字段带 json:"-"，
-// 无法从请求体反序列化伪造）。
-func requireAdminIdentity(actor *Actor) error {
-	if actor == nil || actor.UserID == "" {
-		return fmt.Errorf("admin identity required: %w", ErrAuthenticationRequired)
-	}
-	if actor.SuperAdmin || IsSystemActor(actor) {
-		return nil
-	}
-	return fmt.Errorf("operation requires admin or system identity: %w", ErrPermissionDenied)
-}
-
-// requireInspectionTenant 校验巡检端点（卡死实例/超期 delay 任务）的操作人身份，
-// 返回巡检租户。仅管理员（SuperAdmin）或系统身份可巡；系统身份空租户＝平台级
-// 全租户扫描（定时巡检跨租户是设计内行为），非系统身份必须携带本租户，杜绝
-// 调用方自定裸 tenantID 越权扫其它租户（原形参 tenantID 为空即全租户）。
-func requireInspectionTenant(actor *Actor) (string, error) {
-	if err := requireAdminIdentity(actor); err != nil {
-		return "", err
-	}
-	if !IsSystemActor(actor) && actor.TenantID == "" {
-		return "", fmt.Errorf("tenant ID required for non-system inspection: %w", ErrValidation)
-	}
-	return actor.TenantID, nil
-}
-
-// requireNonEmptyTenantForRealUser 对非系统身份的空租户 fail-closed。列表/批量只读
-// DAO 遇空租户会跳过租户过滤退化为跨租户全量（与单读 ensureTenantAccess 的空租户
-// 拒绝不一致），故真实用户必须携带租户；系统身份空租户放行（平台级巡检/管理视角
-// 跨租户扫描是设计内行为）。
-func requireNonEmptyTenantForRealUser(actor *Actor) error {
-	if actor == nil {
-		return fmt.Errorf("operator identity required: %w", ErrAuthenticationRequired)
-	}
-	if !IsSystemActor(actor) && actor.TenantID == "" {
-		return fmt.Errorf("tenant ID required: %w", ErrValidation)
-	}
-	return nil
-}
-
 // ActorFromCtx 取 ctx 已绑定操作人，未绑定返回 SystemActor。
 // 供引擎内部回调（aspect/节点/级联）使用，保留原身份可维持租户校验与事件归属。
 func ActorFromCtx(ctx context.Context) Actor {
@@ -119,27 +72,4 @@ func bindActor(ctx context.Context, actor Actor) context.Context {
 // 属主校验的入口必须保持 bindActor。
 func bindActorAPI(ctx context.Context, actor Actor) context.Context {
 	return forceAPICallingModeForRealUser(bindActor(ctx, actor))
-}
-
-// ensureTenantAccess 校验 ctx 操作人与资源属同租户。resourceDesc 用于错误信息
-// （如 "process instance"）。跨租户按 ErrPermissionDenied 拒绝；需要隐藏资源
-// 存在性的路径（claim/withdraw 等）仍应各自按 ErrNotFound 处理，不走本方法。
-//
-// 放行三类：资源侧租户为空（单租户部署/历史数据）；显式系统身份（IsSystemActor，
-// 平台自身跨租户操作是设计内的，如定时巡检、级联清理）；ctx 无 actor——引擎
-// 内部级联（aspect/节点回调）不带 actor，与 ActorFromCtx 的"无用户视为系统"
-// 约定一致。API 入口都经 bindActor 绑定操作人，真正要拦的是"半构造 actor"：
-// UserID 非空但租户为空（无租户 claim 的旧 token、漏传租户的调用方）。
-func ensureTenantAccess(ctx context.Context, resourceDesc, resourceTenantID string) error {
-	if resourceTenantID == "" {
-		return nil
-	}
-	u := GetUserFromCtx(ctx)
-	if u == nil || IsSystemActor(u) {
-		return nil
-	}
-	if u.TenantID == resourceTenantID {
-		return nil
-	}
-	return fmt.Errorf("%s belongs to another tenant: %w", resourceDesc, ErrPermissionDenied)
 }

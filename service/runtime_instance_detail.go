@@ -57,8 +57,8 @@ func (s *RuntimeServiceImpl) GetProcessInstanceDetail(ctx context.Context, actor
 
 	// 可见性校验：当前用户必须是 发起人 / 该实例任一 task 的 assignee（含历史）/ CC 抄送归属，否则 IDOR 越权拒绝。
 	// actor.UserID 为空即拒绝（fail-closed）：宿主漏传操作人时不得因缺身份而放行。
-	// 工作流管理员（Actor.SuperAdmin）放行——管理侧需要查看全部实例。
-	if u := GetUserFromCtx(ctx); u != nil && u.SuperAdmin {
+	// 工作流管理员放行——管理侧需要查看全部实例。
+	if isWorkflowAdmin(GetUserFromCtx(ctx)) {
 		// 管理员放行
 	} else if currentUserId == "" {
 		return nil, fmt.Errorf("instance %s detail requires an actor with user id: %w", processInstanceID, ErrAuthenticationRequired)

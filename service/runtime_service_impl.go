@@ -1600,10 +1600,10 @@ func (s *RuntimeServiceImpl) RestoreProcessInstance(ctx context.Context, actor A
 }
 
 // RestoreAllProcessInstances 恢复所有活跃的流程实例（跨租户全量扫描，仅限系统身份
-// 或 SuperAdmin 调用：典型场景是宿主启动时的一致性恢复巡检）。
+// 或工作流管理员调用：典型场景是宿主启动时的一致性恢复巡检）。
 func (s *RuntimeServiceImpl) RestoreAllProcessInstances(ctx context.Context, actor Actor) error {
-	if !actor.SuperAdmin && !IsSystemActor(&actor) {
-		return fmt.Errorf("%w: restore all instances requires system actor or super admin", ErrPermissionDenied)
+	if !isAdminOrSystem(&actor) {
+		return fmt.Errorf("%w: restore all instances requires system actor or workflow admin", ErrPermissionDenied)
 	}
 	ctx = bindActor(ctx, actor)
 	page := 1
