@@ -162,6 +162,32 @@ func TestAddCandidates_WritesRoleRows(t *testing.T) {
 	}
 }
 
+// TestAddCandidates_Authz 验证候选人池变更的鉴权：非管理员/非系统被拒（防自助
+// 加候选→Claim→审批劫持）、跨租户按 NotFound 隐藏、管理员同租户放行。
+func TestAddCandidates_Authz(t *testing.T) {
+	q := candGroupDB(t)
+	ctx := context.Background()
+	seedRoleInstance(t, q, "task-authz", "inst-authz")
+	taskSvc := newCandSvc(q, newMockIdentity())
+
+	// 同租户普通用户（非 assignee 非候选人非管理员）自助加候选 → 拒绝
+	err := taskSvc.AddCandidates(ctx, Actor{UserID: "eve", TenantID: "t1"}, "task-authz", "person", []string{"eve"})
+	require.ErrorIs(t, err, ErrPermissionDenied)
+	err = taskSvc.RemoveCandidates(ctx, Actor{UserID: "eve", TenantID: "t1"}, "task-authz", "person", []string{"eve"})
+	require.ErrorIs(t, err, ErrPermissionDenied)
+
+	// 管理员但跨租户 → NotFound（隐藏任务存在性）
+	err = taskSvc.AddCandidates(ctx, Actor{UserID: "admin", TenantID: "other", SuperAdmin: true}, "task-authz", "person", []string{"eve"})
+	require.ErrorIs(t, err, ErrNotFound)
+
+	// 管理员 + 目标不存在 → NotFound
+	err = taskSvc.AddCandidates(ctx, Actor{UserID: "admin", TenantID: "t1", SuperAdmin: true}, "task-nope", "person", []string{"eve"})
+	require.ErrorIs(t, err, ErrNotFound)
+
+	// 管理员 + 同租户 → 成功
+	require.NoError(t, taskSvc.AddCandidates(ctx, Actor{UserID: "admin", TenantID: "t1", SuperAdmin: true}, "task-authz", "person", []string{"carol"}))
+}
+
 // TestClaim_RoleMember_Passes 验证 role 成员可认领（identity 展开 role→members 命中）。
 func TestClaim_RoleMember_Passes(t *testing.T) {
 	q := candGroupDB(t)

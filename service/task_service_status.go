@@ -52,6 +52,11 @@ func (s *TaskServiceImpl) setPriorityInternal(ctx context.Context, scope *Instan
 	if task == nil {
 		return fmt.Errorf("%w: task", ErrNotFound)
 	}
+	// 归属校验：仅任务归属人/管理员/系统可改优先级（fail-closed），
+	// 对齐 Suspend/Activate 的 assignee 校验，防止同租户横向越权改写他人任务。
+	if err := requireTaskOperatorAuthorized(ctx, task); err != nil {
+		return err
+	}
 	if task.Priority == int32(priority) {
 		return nil
 	}
@@ -108,6 +113,10 @@ func (s *TaskServiceImpl) setDueDateInternal(ctx context.Context, scope *Instanc
 	}
 	if task == nil {
 		return fmt.Errorf("%w: task", ErrNotFound)
+	}
+	// 归属校验：仅任务归属人/管理员/系统可改到期时间（fail-closed），同 setPriorityInternal。
+	if err := requireTaskOperatorAuthorized(ctx, task); err != nil {
+		return err
 	}
 	task.DueDate = &dueDate
 	username := ""

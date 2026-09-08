@@ -326,6 +326,9 @@ func (s *RuntimeServiceImpl) DeleteProcessInstance(ctx context.Context, actor Ac
 		if err := ensureTenantAccess(ctx, "process instance", instance.TenantID); err != nil {
 			return err
 		}
+		if err := requireInstanceOwnerAuthorized(ctx, instance); err != nil {
+			return err
+		}
 
 		// 2. 草稿未进入流转，无历史可归档，直接物理删除
 		if instance.Status == string(enums.InstanceStatusDraft) {
@@ -495,6 +498,9 @@ func (s *RuntimeServiceImpl) suspendProcessInstanceInternal(ctx context.Context,
 
 	if currentUser := GetUserFromCtx(ctx); currentUser != nil {
 		if err := ensureTenantAccess(ctx, "process instance", instance.TenantID); err != nil {
+			return err
+		}
+		if err := requireInstanceOwnerAuthorized(ctx, instance); err != nil {
 			return err
 		}
 		instance.UpdatedBy = &currentUser.UserName
@@ -669,6 +675,14 @@ func (s *RuntimeServiceImpl) activateProcessInstanceInternal(ctx context.Context
 		}
 		initiator := Actor{UserID: instance.StartUserID, TenantID: instance.TenantID}
 		if err := s.checkStarterScope(ctx, processDef, initiator); err != nil {
+			return nil, false, err
+		}
+	}
+
+	// 挂起恢复（非草稿路径）也要求实例属主/管理员身份，与终止/删除/重启/强恢复等
+	// 实例级变更口径一致（fail-closed）。草稿激活已在上面按创建者校验。
+	if instance.Status != string(enums.InstanceStatusDraft) {
+		if err := requireInstanceOwnerAuthorized(ctx, instance); err != nil {
 			return nil, false, err
 		}
 	}
@@ -927,6 +941,9 @@ func (s *RuntimeServiceImpl) RestartProcessInstance(ctx context.Context, actor A
 	}
 
 	if err := ensureTenantAccess(ctx, "process instance", original.TenantID); err != nil {
+		return "", err
+	}
+	if err := requireInstanceOwnerAuthorized(ctx, original); err != nil {
 		return "", err
 	}
 
@@ -1307,6 +1324,9 @@ func (s *RuntimeServiceImpl) ForceResumeInstance(ctx context.Context, actor Acto
 	if err := ensureTenantAccess(ctx, "process instance", inst.TenantID); err != nil {
 		return err
 	}
+	if err := requireInstanceOwnerAuthorized(ctx, inst); err != nil {
+		return err
+	}
 	if enums.IsTerminalInstanceStatus(enums.InstanceStatus(inst.Status)) {
 		return fmt.Errorf("process instance is in terminal status: %s", inst.Status)
 	}
@@ -1672,6 +1692,9 @@ func (s *RuntimeServiceImpl) RescueExpiredDelayTask(ctx context.Context, actor A
 	if instance.Status != string(enums.InstanceStatusActive) {
 		return fmt.Errorf("process instance %s is %s, only active instances can be rescued", instanceID, instance.Status)
 	}
+	if err := requireInstanceOwnerAuthorized(ctx, instance); err != nil {
+		return err
+	}
 
 	// 判定与重驱须与对端副本的驱动互斥（同 RestoreProcessInstance），救援路径
 	// 走严格模式：拿不到门闩说明计时器所属副本可能仍在驱动，让位等下一拍
@@ -1767,6 +1790,9 @@ func (s *RuntimeServiceImpl) ReDriveProcessInstance(ctx context.Context, actor A
 	}
 	if instance.Status != string(enums.InstanceStatusActive) {
 		return fmt.Errorf("instance %s is %s, only active instances can be re-driven", processInstanceID, instance.Status)
+	}
+	if err := requireInstanceOwnerAuthorized(ctx, instance); err != nil {
+		return err
 	}
 	node := ""
 	if instance.CurrentActivity != nil {
@@ -2127,6 +2153,9 @@ func (s *RuntimeServiceImpl) TerminateInTx(ctx context.Context, tx *query.Query,
 	}
 
 	if err := ensureTenantAccess(ctx, "process instance", instance.TenantID); err != nil {
+		return nil, err
+	}
+	if err := requireInstanceOwnerAuthorized(ctx, instance); err != nil {
 		return nil, err
 	}
 

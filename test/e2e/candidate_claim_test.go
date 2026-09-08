@@ -249,7 +249,7 @@ func TestClaimMixedPool_PersonAndDept(t *testing.T) {
 	taskID := e.pendingClaimTaskID(instID)
 
 	require.NoError(t, e.engine.GetTaskService().AddCandidates(
-		e.userCtx("eve"), service.Actor{UserID: "eve", TenantID: e2eTenantID},
+		e.userCtx("admin"), adminActor(),
 		taskID, string(enums.EntityTypePerson), []string{"carol"}),
 		"追加 person 候选")
 
