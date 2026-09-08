@@ -95,7 +95,7 @@ func TestSecFix_SetAssigneeRequiresAdmin(t *testing.T) {
 	require.Error(t, taskSvc.SetAssignee(ctx, Actor{TenantID: "t1"}, "task-sa", "userC"))
 
 	// 管理员 → 放行
-	require.NoError(t, taskSvc.SetAssignee(ctx, Actor{UserID: "admin1", TenantID: "t1", SuperAdmin: true}, "task-sa", "userC"))
+	require.NoError(t, taskSvc.SetAssignee(ctx, Actor{UserID: "admin1", TenantID: "t1", WorkflowAdmin: true}, "task-sa", "userC"))
 	persisted, err := taskSvc.taskDAO.Get(ctx, "task-sa")
 	require.NoError(t, err)
 	require.Equal(t, "userC", *persisted.Assignee)
@@ -117,7 +117,7 @@ func TestSecFix_SetOwnerRequiresAdmin(t *testing.T) {
 	require.True(t, errors.Is(err, ErrPermissionDenied), "期望 ErrPermissionDenied，got %v", err)
 
 	// 管理员 → 放行
-	require.NoError(t, taskSvc.SetOwner(ctx, Actor{UserID: "admin1", TenantID: "t1", SuperAdmin: true}, "task-so", "userB"))
+	require.NoError(t, taskSvc.SetOwner(ctx, Actor{UserID: "admin1", TenantID: "t1", WorkflowAdmin: true}, "task-so", "userB"))
 }
 
 // 委派态任务被转办后，Owner 必须清空：转办意味着新受理人是最终办理人，

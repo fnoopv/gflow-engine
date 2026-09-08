@@ -27,10 +27,10 @@ import (
 )
 
 // adminActor 运维接口测试用的管理员身份（与 e2e 租户一致）。
-// SuperAdmin 置位：终止/重启/强恢复/重驱动/救援等实例级运维操作现要求属主或管理员，
+// WorkflowAdmin 置位：终止/重启/强恢复/重驱动/救援等实例级运维操作现要求属主或管理员，
 // e2e 以"admin"作为运营管理员驱动这些接口。
 func adminActor() service.Actor {
-	return service.Actor{UserID: "admin", UserName: "admin", TenantID: e2eTenantID, SuperAdmin: true}
+	return service.Actor{UserID: "admin", UserName: "admin", TenantID: e2eTenantID, WorkflowAdmin: true}
 }
 
 // ---------------------------------------------------------------------------

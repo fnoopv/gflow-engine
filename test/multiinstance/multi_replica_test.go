@@ -316,7 +316,7 @@ func TestMultiReplica_ExecutionCacheInvalidation(t *testing.T) {
 	}
 	rawOld, _ := json.Marshal(def)
 	proc, err := env.replicaA.GetProcessService().Deploy(context.Background(),
-		service.Actor{UserID: "admin", TenantID: miTenantID, SuperAdmin: true},
+		service.Actor{UserID: "admin", TenantID: miTenantID, WorkflowAdmin: true},
 		&model.WfProcess{ProcessKey: "mi_cache_inval", Name: "mi_cache_inval", DefinitionJSON: string(rawOld),
 			Status: string(enums.ProcessStatusActive), TenantID: miTenantID, CreatedBy: "admin"}, true)
 	require.NoError(t, err, "deploy")
@@ -332,7 +332,7 @@ func TestMultiReplica_ExecutionCacheInvalidation(t *testing.T) {
 	def["ruleChain"].(map[string]interface{})["name"] = "新名"
 	rawNew, _ := json.Marshal(def)
 	require.NoError(t, env.replicaA.GetProcessService().Update(context.Background(),
-		service.Actor{UserID: "admin", TenantID: miTenantID, SuperAdmin: true},
+		service.Actor{UserID: "admin", TenantID: miTenantID, WorkflowAdmin: true},
 		&model.WfProcess{ID: proc.ID, ProcessKey: proc.ProcessKey, Name: "mi_cache_inval",
 			DefinitionJSON: string(rawNew), Status: string(enums.ProcessStatusActive),
 			TenantID: miTenantID}), "update definition")

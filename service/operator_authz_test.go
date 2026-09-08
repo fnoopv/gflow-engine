@@ -32,7 +32,7 @@ func TestRequireInstanceOwnerAuthorized(t *testing.T) {
 		wantErr error
 	}{
 		{"owner allowed", &Actor{UserID: "owner", TenantID: "t1"}, CallingModeAPI, nil},
-		{"super admin allowed", &Actor{UserID: "admin", TenantID: "t1", SuperAdmin: true}, CallingModeAPI, nil},
+		{"super admin allowed", &Actor{UserID: "admin", TenantID: "t1", WorkflowAdmin: true}, CallingModeAPI, nil},
 		{"system allowed", &Actor{UserID: "system"}, CallingModeAPI, nil},
 		{"non-owner same tenant denied", &Actor{UserID: "eve", TenantID: "t1"}, CallingModeAPI, ErrPermissionDenied},
 		{"nil actor denied", nil, CallingModeAPI, ErrAuthenticationRequired},
@@ -72,7 +72,7 @@ func TestRequireTaskOperatorAuthorized(t *testing.T) {
 		wantErr error
 	}{
 		{"assignee allowed", assigned, &Actor{UserID: "owner", TenantID: "t1"}, nil},
-		{"super admin allowed", assigned, &Actor{UserID: "admin", TenantID: "t1", SuperAdmin: true}, nil},
+		{"super admin allowed", assigned, &Actor{UserID: "admin", TenantID: "t1", WorkflowAdmin: true}, nil},
 		{"system allowed", assigned, &Actor{UserID: "system"}, nil},
 		{"non-assignee denied", assigned, &Actor{UserID: "eve", TenantID: "t1"}, ErrPermissionDenied},
 		{"unassigned non-admin denied", unassigned, &Actor{UserID: "eve", TenantID: "t1"}, ErrPermissionDenied},

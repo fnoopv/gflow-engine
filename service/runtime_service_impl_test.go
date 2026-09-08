@@ -471,7 +471,7 @@ func TestSetProcessInstanceVariables_OwnerAuthorized(t *testing.T) {
 	require.NoError(t, svc.SetProcessInstanceVariables(ctx, Actor{UserID: "starter", TenantID: "t1"}, "inst-owner", map[string]interface{}{"k": "v"}))
 
 	// 管理员 → 放行（单变量版）
-	require.NoError(t, svc.SetProcessInstanceVariable(ctx, Actor{UserID: "admin", TenantID: "t1", SuperAdmin: true}, "inst-owner", "k2", "v2"))
+	require.NoError(t, svc.SetProcessInstanceVariable(ctx, Actor{UserID: "admin", TenantID: "t1", WorkflowAdmin: true}, "inst-owner", "k2", "v2"))
 
 	// 单变量删除：同租户非发起人 → 拒绝
 	require.ErrorIs(t, svc.RemoveProcessInstanceVariable(ctx, Actor{UserID: "eve", TenantID: "t1"}, "inst-owner", "k"), ErrPermissionDenied)

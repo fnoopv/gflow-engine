@@ -209,7 +209,7 @@ func TestReassignTask_EndToEnd(t *testing.T) {
 	}
 	svc := &TaskServiceImpl{taskDAO: d, workflowEngine: &reassignListenerEngine{listener: listener}}
 
-	old, err := svc.Reassign(ctx, Actor{UserID: "admin1", TenantID: "t1", SuperAdmin: true}, "task-e2e", "userB", "负载调整")
+	old, err := svc.Reassign(ctx, Actor{UserID: "admin1", TenantID: "t1", WorkflowAdmin: true}, "task-e2e", "userB", "负载调整")
 	require.NoError(t, err)
 	require.Equal(t, "userA", old)
 
@@ -250,12 +250,12 @@ func TestReassignTask_EndToEnd_RejectsNonActive(t *testing.T) {
 		CreatedAt: now, CreatedBy: "system",
 	}))
 	svc := &TaskServiceImpl{taskDAO: d, workflowEngine: &reassignListenerEngine{}}
-	_, err := svc.Reassign(ctx, Actor{UserID: "admin1", TenantID: "t1", SuperAdmin: true}, "task-done", "userB", "")
+	_, err := svc.Reassign(ctx, Actor{UserID: "admin1", TenantID: "t1", WorkflowAdmin: true}, "task-done", "userB", "")
 	require.Error(t, err)
 	require.True(t, errors.Is(err, ErrValidation))
 }
 
-// TestReassignTask_NonAdminDenied 验证：普通同租户用户（无 SuperAdmin，也非系统身份）改派被拒绝。
+// TestReassignTask_NonAdminDenied 验证：普通同租户用户（无 WorkflowAdmin，也非系统身份）改派被拒绝。
 // 鉴权在 DB 读之前执行，故无需建表。
 func TestReassignTask_NonAdminDenied(t *testing.T) {
 	svc := &TaskServiceImpl{}

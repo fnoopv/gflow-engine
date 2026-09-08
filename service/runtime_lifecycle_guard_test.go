@@ -153,5 +153,5 @@ func TestActivateProcessInstance_WakeAuthorization(t *testing.T) {
 
 	// 管理员
 	newSuspended("inst-wake-admin")
-	require.NoError(t, rs.ActivateProcessInstance(ctx, Actor{UserID: "admin", TenantID: "t1", SuperAdmin: true}, "inst-wake-admin"))
+	require.NoError(t, rs.ActivateProcessInstance(ctx, Actor{UserID: "admin", TenantID: "t1", WorkflowAdmin: true}, "inst-wake-admin"))
 }

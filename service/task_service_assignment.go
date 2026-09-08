@@ -15,7 +15,7 @@ import (
 )
 
 // SetAssignee 设置任务分配人。
-// 强制改派任意任务的办理人，与 Reassign 同属管理操作：必须管理员（SuperAdmin）
+// 强制改派任意任务的办理人，与 Reassign 同属管理操作：必须管理员（WorkflowAdmin）
 // 或系统身份，普通用户无权调用（否则可劫持他人任务或解除分配使任务回池）。
 func (s *TaskServiceImpl) SetAssignee(ctx context.Context, actor Actor, taskID, userID string) error {
 	ctx = bindActor(ctx, actor)
@@ -86,7 +86,7 @@ func (s *TaskServiceImpl) setAssigneeInternal(ctx context.Context, scope *Instan
 }
 
 // SetOwner 设置任务所有者。
-// Owner 驱动委派归还路径，篡改即改写审批走向，属管理操作：必须管理员（SuperAdmin）
+// Owner 驱动委派归还路径，篡改即改写审批走向，属管理操作：必须管理员（WorkflowAdmin）
 // 或系统身份。
 func (s *TaskServiceImpl) SetOwner(ctx context.Context, actor Actor, taskID, userID string) error {
 	ctx = bindActor(ctx, actor)

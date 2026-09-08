@@ -68,11 +68,11 @@ type TaskService interface {
 	// 委派中的任务（有 Owner）会归还给原审批人而非扔回候选池。
 	Unclaim(ctx context.Context, actor Actor, taskID string) error
 
-	// SetAssignee 设置任务分配人。管理操作：须管理员（SuperAdmin）或系统身份，
+	// SetAssignee 设置任务分配人。管理操作：须管理员（WorkflowAdmin）或系统身份，
 	// 普通用户无权调用（否则可劫持他人任务或解除分配使任务回池）。
 	SetAssignee(ctx context.Context, actor Actor, taskID, userID string) error
 
-	// SetOwner 设置任务所有者。管理操作：须管理员（SuperAdmin）或系统身份，
+	// SetOwner 设置任务所有者。管理操作：须管理员（WorkflowAdmin）或系统身份，
 	// Owner 驱动委派归还路径，普通用户无权改写。
 	SetOwner(ctx context.Context, actor Actor, taskID, userID string) error
 

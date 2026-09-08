@@ -52,7 +52,7 @@
 // “以谁视角查”的接口同样用 actor 表达视角（含 TenantID 租户范围）；纯按
 // ID/键的查询不携带 actor。
 //
-// Actor（identity.go）携带 UserID/UserName/TenantID 与 SuperAdmin 标记。
+// Actor（identity.go）携带 UserID/UserName/TenantID 与 WorkflowAdmin 标记。
 // 引擎不含用户体系、不做认证：宿主从认证层（如 JWT）构造 Actor 后显式
 // 传参，身份真实性由宿主保证。引擎内部机制代替用户执行的动作（节点自动
 // 推进、驳回级联终止、巡检等）传 SystemActor()。

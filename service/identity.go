@@ -27,10 +27,10 @@ type Actor struct {
 	UserID   string `json:"userId"`
 	UserName string `json:"userName"`
 	TenantID string `json:"tenantId"`
-	// SuperAdmin：工作流管理员（持 workflow:instance:view 的运营/管理角色）。
+	// WorkflowAdmin：工作流管理员（持 workflow:instance:view 的运营/管理角色）。
 	// 实例详情 IDOR 校验对其放行（管理侧需要查看所有实例）；普通审批用户不设此标记。
 	// 仅由宿主服务端按角色判定设置；json:"-" 禁止反序列化，防止客户端伪造管理员标记。
-	SuperAdmin bool `json:"-"`
+	WorkflowAdmin bool `json:"-"`
 }
 
 // SystemActor 引擎内部机制（节点自动推进/巡检等）代替用户执行时的操作人，

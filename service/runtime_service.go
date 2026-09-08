@@ -105,7 +105,7 @@ type RuntimeService interface {
 	RestoreProcessInstance(ctx context.Context, actor Actor, processInstanceID string) error
 
 	// RestoreAllProcessInstances 恢复所有活跃的流程实例（跨租户全量扫描，
-	// 仅限系统身份或 SuperAdmin：典型场景是宿主启动时的一致性恢复巡检）。
+	// 仅限系统身份或 WorkflowAdmin：典型场景是宿主启动时的一致性恢复巡检）。
 	RestoreAllProcessInstances(ctx context.Context, actor Actor) error
 
 	// RemoveProcessInstanceVariable 删除流程实例变量
@@ -163,6 +163,6 @@ type RuntimeService interface {
 
 	// GetProcessInstanceDetail 获取实例详情（审批进度列表 + 流程定义 + 表单等装配视图）。
 	// 权限：actor.UserID 必须是 发起人 / 该实例任一任务 assignee（含已办）/ CC 抄送归属，
-	// 否则返回 ErrPermissionDenied；Actor.SuperAdmin 放行。
+	// 否则返回 ErrPermissionDenied；Actor.WorkflowAdmin 放行。
 	GetProcessInstanceDetail(ctx context.Context, actor Actor, processInstanceID string) (*dto.InstanceDetailResponse, error)
 }

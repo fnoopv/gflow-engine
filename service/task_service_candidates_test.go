@@ -177,15 +177,15 @@ func TestAddCandidates_Authz(t *testing.T) {
 	require.ErrorIs(t, err, ErrPermissionDenied)
 
 	// 管理员但跨租户 → NotFound（隐藏任务存在性）
-	err = taskSvc.AddCandidates(ctx, Actor{UserID: "admin", TenantID: "other", SuperAdmin: true}, "task-authz", "person", []string{"eve"})
+	err = taskSvc.AddCandidates(ctx, Actor{UserID: "admin", TenantID: "other", WorkflowAdmin: true}, "task-authz", "person", []string{"eve"})
 	require.ErrorIs(t, err, ErrNotFound)
 
 	// 管理员 + 目标不存在 → NotFound
-	err = taskSvc.AddCandidates(ctx, Actor{UserID: "admin", TenantID: "t1", SuperAdmin: true}, "task-nope", "person", []string{"eve"})
+	err = taskSvc.AddCandidates(ctx, Actor{UserID: "admin", TenantID: "t1", WorkflowAdmin: true}, "task-nope", "person", []string{"eve"})
 	require.ErrorIs(t, err, ErrNotFound)
 
 	// 管理员 + 同租户 → 成功
-	require.NoError(t, taskSvc.AddCandidates(ctx, Actor{UserID: "admin", TenantID: "t1", SuperAdmin: true}, "task-authz", "person", []string{"carol"}))
+	require.NoError(t, taskSvc.AddCandidates(ctx, Actor{UserID: "admin", TenantID: "t1", WorkflowAdmin: true}, "task-authz", "person", []string{"carol"}))
 }
 
 // TestClaim_RoleMember_Passes 验证 role 成员可认领（identity 展开 role→members 命中）。

@@ -172,7 +172,7 @@ func TestE2E_DelayRescue_ExpiredTaskAdvancesWithoutDuplicate(t *testing.T) {
 		time.Now().Add(-2*time.Hour), time.Now().Add(-3*time.Hour), delayTaskID).Error)
 
 	// 检测：超期 delay 命中（宽限 60s，2h 前已到期）
-	expired, err := env.engine.GetRuntimeService().GetExpiredDelayTasks(env.userCtx("admin"), service.Actor{UserID: "admin", UserName: "admin", TenantID: e2eTenantID, SuperAdmin: true})
+	expired, err := env.engine.GetRuntimeService().GetExpiredDelayTasks(env.userCtx("admin"), service.Actor{UserID: "admin", UserName: "admin", TenantID: e2eTenantID, WorkflowAdmin: true})
 	require.NoError(t, err)
 	require.Len(t, expired, 1)
 	assert.Equal(t, delayTaskID, expired[0].ID)
@@ -207,7 +207,7 @@ func TestE2E_DelayRescue_NotExpiredRejected(t *testing.T) {
 		return task != nil
 	}, 3*time.Second, 50*time.Millisecond)
 
-	expired, err := env.engine.GetRuntimeService().GetExpiredDelayTasks(env.userCtx("admin"), service.Actor{UserID: "admin", UserName: "admin", TenantID: e2eTenantID, SuperAdmin: true})
+	expired, err := env.engine.GetRuntimeService().GetExpiredDelayTasks(env.userCtx("admin"), service.Actor{UserID: "admin", UserName: "admin", TenantID: e2eTenantID, WorkflowAdmin: true})
 	require.NoError(t, err)
 	assert.Empty(t, expired, "future delay task must not be detected as expired")
 

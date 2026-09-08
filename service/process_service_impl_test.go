@@ -156,13 +156,13 @@ func TestProcessServiceImpl_Update_EmptyID(t *testing.T) {
 func TestProcessServiceImpl_Update_NilDAO_Panics(t *testing.T) {
 	s := &ProcessServiceImpl{}
 	expectPanic(t, "Update", func() {
-		s.Update(context.Background(), Actor{UserID: "tester", TenantID: "t1", SuperAdmin: true}, &model.WfProcess{ID: "proc-1", Name: "Test"})
+		s.Update(context.Background(), Actor{UserID: "tester", TenantID: "t1", WorkflowAdmin: true}, &model.WfProcess{ID: "proc-1", Name: "Test"})
 	})
 }
 
 func TestProcessServiceImpl_Activate_EmptyID(t *testing.T) {
 	s := newProcessServiceImplForTest()
-	_, err := s.Activate(context.Background(), Actor{UserID: "tester", TenantID: "tenant1", SuperAdmin: true}, "")
+	_, err := s.Activate(context.Background(), Actor{UserID: "tester", TenantID: "tenant1", WorkflowAdmin: true}, "")
 	if err == nil {
 		t.Error("expected error for empty processID")
 	}
@@ -185,28 +185,28 @@ func TestProcessServiceImpl_List_NilDAO_Panics(t *testing.T) {
 func TestProcessServiceImpl_Delete_NilInstanceDAO_Panics(t *testing.T) {
 	s := &ProcessServiceImpl{}
 	expectPanic(t, "Delete", func() {
-		s.Delete(context.Background(), Actor{UserID: "tester", TenantID: "t1", SuperAdmin: true}, "proc-1")
+		s.Delete(context.Background(), Actor{UserID: "tester", TenantID: "t1", WorkflowAdmin: true}, "proc-1")
 	})
 }
 
 func TestProcessServiceImpl_UpdateStatus_NilDAO_Panics(t *testing.T) {
 	s := &ProcessServiceImpl{}
 	expectPanic(t, "UpdateStatus", func() {
-		s.UpdateStatus(context.Background(), Actor{UserID: "tester", TenantID: "t1", SuperAdmin: true}, "proc-1", "active")
+		s.UpdateStatus(context.Background(), Actor{UserID: "tester", TenantID: "t1", WorkflowAdmin: true}, "proc-1", "active")
 	})
 }
 
 func TestProcessServiceImpl_UpdateStatusByKey_NilDAO_Panics(t *testing.T) {
 	s := &ProcessServiceImpl{}
 	expectPanic(t, "UpdateStatusByKey", func() {
-		s.UpdateStatusByKey(context.Background(), Actor{UserID: "tester", TenantID: "t1", SuperAdmin: true}, "key1", "active")
+		s.UpdateStatusByKey(context.Background(), Actor{UserID: "tester", TenantID: "t1", WorkflowAdmin: true}, "key1", "active")
 	})
 }
 
 func TestProcessServiceImpl_Retire_NilDAO_Panics(t *testing.T) {
 	s := &ProcessServiceImpl{}
 	expectPanic(t, "Retire", func() {
-		s.Retire(context.Background(), Actor{UserID: "tester", TenantID: "t1", SuperAdmin: true}, "proc-1")
+		s.Retire(context.Background(), Actor{UserID: "tester", TenantID: "t1", WorkflowAdmin: true}, "proc-1")
 	})
 }
 

@@ -137,6 +137,6 @@ func TestTaskComments_RequireAssigneeOrAdmin(t *testing.T) {
 	require.NoError(t, err)
 
 	// 管理员 → 放行
-	_, err = svc.AddTaskComment(ctx, Actor{UserID: "admin", TenantID: "t1", SuperAdmin: true}, "task-p1", "管理意见")
+	_, err = svc.AddTaskComment(ctx, Actor{UserID: "admin", TenantID: "t1", WorkflowAdmin: true}, "task-p1", "管理意见")
 	require.NoError(t, err)
 }

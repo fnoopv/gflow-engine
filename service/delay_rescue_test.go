@@ -129,7 +129,7 @@ func TestGetExpiredDelayTasks_Filters(t *testing.T) {
 	require.NoError(t, dao.NewTaskDAOWithQuery(q).Update(context.Background(),
 		&model.WfTask{ID: "t-other-tenant", TenantID: "t2"}))
 
-	got, err := rs.GetExpiredDelayTasks(context.Background(), Actor{UserID: "admin", UserName: "admin", TenantID: "t1", SuperAdmin: true})
+	got, err := rs.GetExpiredDelayTasks(context.Background(), Actor{UserID: "admin", UserName: "admin", TenantID: "t1", WorkflowAdmin: true})
 	require.NoError(t, err)
 	ids := make([]string, 0, len(got))
 	for _, task := range got {
@@ -146,7 +146,7 @@ func TestGetExpiredDelayTasks_Filters(t *testing.T) {
 	_, err = rs.GetExpiredDelayTasks(context.Background(), Actor{UserID: "eve", TenantID: "t1"})
 	require.ErrorIs(t, err, ErrPermissionDenied)
 	// 管理员但空租户被拒（管理员仅能巡本租户，跨租户巡检仅限系统身份）
-	_, err = rs.GetExpiredDelayTasks(context.Background(), Actor{UserID: "admin", SuperAdmin: true})
+	_, err = rs.GetExpiredDelayTasks(context.Background(), Actor{UserID: "admin", WorkflowAdmin: true})
 	require.ErrorIs(t, err, ErrValidation)
 }
 
@@ -157,7 +157,7 @@ func TestRescueExpiredDelayTask_Validation(t *testing.T) {
 	rs := newDelayRescueRS(q)
 	now := time.Now()
 	ctx := context.Background()
-	sysActor := Actor{UserID: "sys", TenantID: "t1", SuperAdmin: true}
+	sysActor := Actor{UserID: "sys", TenantID: "t1", WorkflowAdmin: true}
 
 	// 实例供任务关联
 	require.NoError(t, dao.NewInstanceDAOWithQuery(q).Create(ctx, &model.WfInstance{
@@ -225,7 +225,7 @@ func TestRescueExpiredDelayTask_GateBusy(t *testing.T) {
 	rs.workflowEngine = &gateTestEngine{l: shared}
 	now := time.Now()
 	ctx := context.Background()
-	sysActor := Actor{UserID: "sys", TenantID: "t1", SuperAdmin: true}
+	sysActor := Actor{UserID: "sys", TenantID: "t1", WorkflowAdmin: true}
 
 	require.NoError(t, dao.NewInstanceDAOWithQuery(q).Create(ctx, &model.WfInstance{
 		ID: "inst-busy", ProcessID: "proc-d", Name: "d", Status: string(enums.InstanceStatusActive),
@@ -250,7 +250,7 @@ func TestReDriveProcessInstance_GateBusy(t *testing.T) {
 	rs.workflowEngine = &gateTestEngine{l: shared}
 	now := time.Now()
 	ctx := context.Background()
-	sysActor := Actor{UserID: "sys", TenantID: "t1", SuperAdmin: true}
+	sysActor := Actor{UserID: "sys", TenantID: "t1", WorkflowAdmin: true}
 
 	activity := "node_ai"
 	require.NoError(t, dao.NewInstanceDAOWithQuery(q).Create(ctx, &model.WfInstance{

@@ -417,7 +417,7 @@ func TestEngine_FiresTerminatedEventOnTerminate(t *testing.T) {
 	seedInstance(t, engine, instanceID, "starter-7")
 	seedActiveTask(t, engine, instanceID, "userTask1", "assignee-7")
 
-	if err := engine.GetRuntimeService().TerminateProcessInstance(context.Background(), Actor{UserID: "admin-s", TenantID: "tenant-test", SuperAdmin: true}, instanceID, "测试终止"); err != nil {
+	if err := engine.GetRuntimeService().TerminateProcessInstance(context.Background(), Actor{UserID: "admin-s", TenantID: "tenant-test", WorkflowAdmin: true}, instanceID, "测试终止"); err != nil {
 		t.Fatalf("TerminateProcessInstance failed: %v", err)
 	}
 
@@ -757,7 +757,7 @@ func TestEngine_FiresSuspendedAndActivatedEvents(t *testing.T) {
 	// current_activity 非空：激活后不走草稿启动分支
 	engine.GetDB().Exec("UPDATE wf_instance SET current_activity = 'node1' WHERE id = ?", instanceID)
 
-	adminActor := Actor{UserID: "admin-s", UserName: "admin-s", TenantID: "tenant-test", SuperAdmin: true}
+	adminActor := Actor{UserID: "admin-s", UserName: "admin-s", TenantID: "tenant-test", WorkflowAdmin: true}
 	ctx := SetUserToCtx(context.Background(), &adminActor)
 	if err := rt.SuspendProcessInstance(ctx, adminActor, instanceID); err != nil {
 		t.Fatalf("SuspendProcessInstance failed: %v", err)

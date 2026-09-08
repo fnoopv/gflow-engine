@@ -308,7 +308,7 @@ func TestHistoryService_DeleteHistoricTaskInstance_OperatorAuthorized(t *testing
 	require.NoError(t, svc.DeleteHistoricTaskInstance(ctx, Actor{UserID: "worker", TenantID: "t1"}, "hi-task-1"))
 }
 
-// 历史任务删除的管理员放行（SuperAdmin 同租户）。
+// 历史任务删除的管理员放行（WorkflowAdmin 同租户）。
 func TestHistoryService_DeleteHistoricTaskInstance_AdminAuthorized(t *testing.T) {
 	q := secFixDB(t)
 	ctx := context.Background()
@@ -318,5 +318,5 @@ func TestHistoryService_DeleteHistoricTaskInstance_AdminAuthorized(t *testing.T)
 	}))
 	svc := &HistoryServiceImpl{hiTaskDAO: dao.NewHiTaskDAOWithQuery(q)}
 
-	require.NoError(t, svc.DeleteHistoricTaskInstance(ctx, Actor{UserID: "admin", TenantID: "t1", SuperAdmin: true}, "hi-task-2"))
+	require.NoError(t, svc.DeleteHistoricTaskInstance(ctx, Actor{UserID: "admin", TenantID: "t1", WorkflowAdmin: true}, "hi-task-2"))
 }
