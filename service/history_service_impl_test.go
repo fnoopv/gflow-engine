@@ -5,7 +5,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rulego/gflow-engine/dao"
 	"github.com/rulego/gflow-engine/model"
+	"github.com/stretchr/testify/require"
 )
 
 // ---------------------------------------------------------------------------
@@ -264,4 +266,57 @@ func TestHistoryService_DeleteHistoricTaskInstance_EmptyID(t *testing.T) {
 	if err == nil {
 		t.Error("expected error for empty ID")
 	}
+}
+
+// 历史实例删除的属主校验：同租户非发起人被拒，发起人/管理员放行（横向越权防护）。
+func TestHistoryService_DeleteHistoricProcessInstance_OwnerAuthorized(t *testing.T) {
+	q := secFixDB(t)
+	ctx := context.Background()
+	require.NoError(t, q.WfHiInstance.Create(&model.WfHiInstance{
+		ID: "hi-inst-1", ProcessID: "proc-1", Name: "h", Status: "completed",
+		StartUserID: "starter", TenantID: "t1", CreatedBy: "starter", CreatedAt: time.Now(),
+	}))
+	svc := &HistoryServiceImpl{hiInstanceDAO: dao.NewHiInstanceDAOWithQuery(q)}
+
+	// 同租户非发起人 → 拒绝
+	err := svc.DeleteHistoricProcessInstance(ctx, Actor{UserID: "eve", TenantID: "t1"}, "hi-inst-1")
+	require.ErrorIs(t, err, ErrPermissionDenied, "同租户非发起人删除他人归档实例应被拒绝")
+
+	// 空操作人 → 拒绝（fail-closed）
+	err = svc.DeleteHistoricProcessInstance(ctx, Actor{TenantID: "t1"}, "hi-inst-1")
+	require.ErrorIs(t, err, ErrAuthenticationRequired, "空操作人删除归档实例应被拒绝")
+
+	// 发起人 → 放行
+	require.NoError(t, svc.DeleteHistoricProcessInstance(ctx, Actor{UserID: "starter", TenantID: "t1"}, "hi-inst-1"))
+}
+
+// 历史任务删除的办理人校验：同租户非办理人被拒，办理人/管理员放行。
+func TestHistoryService_DeleteHistoricTaskInstance_OperatorAuthorized(t *testing.T) {
+	q := secFixDB(t)
+	ctx := context.Background()
+	require.NoError(t, q.WfHiTask.Create(&model.WfHiTask{
+		ID: "hi-task-1", ProcessID: "proc-1", TaskType: "user_task", Name: "审批",
+		Status: "completed", Assignee: secFixStrPtr("worker"), TenantID: "t1", CreatedBy: "system", CreatedAt: time.Now(),
+	}))
+	svc := &HistoryServiceImpl{hiTaskDAO: dao.NewHiTaskDAOWithQuery(q)}
+
+	// 同租户非办理人 → 拒绝
+	err := svc.DeleteHistoricTaskInstance(ctx, Actor{UserID: "eve", TenantID: "t1"}, "hi-task-1")
+	require.ErrorIs(t, err, ErrPermissionDenied, "同租户非办理人删除他人归档任务应被拒绝")
+
+	// 办理人 → 放行
+	require.NoError(t, svc.DeleteHistoricTaskInstance(ctx, Actor{UserID: "worker", TenantID: "t1"}, "hi-task-1"))
+}
+
+// 历史任务删除的管理员放行（SuperAdmin 同租户）。
+func TestHistoryService_DeleteHistoricTaskInstance_AdminAuthorized(t *testing.T) {
+	q := secFixDB(t)
+	ctx := context.Background()
+	require.NoError(t, q.WfHiTask.Create(&model.WfHiTask{
+		ID: "hi-task-2", ProcessID: "proc-1", TaskType: "user_task", Name: "审批",
+		Status: "completed", Assignee: secFixStrPtr("worker"), TenantID: "t1", CreatedBy: "system", CreatedAt: time.Now(),
+	}))
+	svc := &HistoryServiceImpl{hiTaskDAO: dao.NewHiTaskDAOWithQuery(q)}
+
+	require.NoError(t, svc.DeleteHistoricTaskInstance(ctx, Actor{UserID: "admin", TenantID: "t1", SuperAdmin: true}, "hi-task-2"))
 }
