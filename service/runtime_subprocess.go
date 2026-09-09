@@ -31,8 +31,14 @@ func (s *RuntimeServiceImpl) StartSubProcessInstance(ctx context.Context, parent
 	if childDef == nil {
 		return "", fmt.Errorf("%w: child process def %s", ErrNotFound, childProcessDefID)
 	}
-	// CreatedBy 现存储发起人用户 ID（见 startInstanceCore 注释），子流程发起人沿用父实例身份。
-	initiator := Actor{UserID: parent.StartUserID, UserName: parent.CreatedBy, TenantID: parent.TenantID}
+	// 防御性租户比对：子流程定义必须与父实例同租户，阻断跨租户子流程注入。
+	if childDef.TenantID != parent.TenantID {
+		return "", fmt.Errorf("subProcess child def %s belongs to tenant %q, parent tenant %q: %w",
+			childProcessDefID, childDef.TenantID, parent.TenantID, ErrPermissionDenied)
+	}
+	// CreatedBy/StartUserID 现均存发起人"用户 ID"（见 startInstanceCore 注释），父实例并不保存
+	// 展示名；子流程发起人只继承用户 ID，UserName 留空由展示层按 ID 批量查名。
+	initiator := Actor{UserID: parent.StartUserID, TenantID: parent.TenantID}
 	// 子流程继承父流程业务变量:subProcess 节点目前传 nil variables,子实例会丢失父数据,
 	// 子链内的条件节点拿不到父变量。调用方未显式传变量时,从父实例 variables(启动业务变量)
 	// 加载,让子链能读到父数据。

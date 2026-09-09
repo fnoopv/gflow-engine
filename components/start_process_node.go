@@ -45,6 +45,9 @@ type StartProcessNodeConfig struct {
 type StartProcessNode struct {
 	Config         StartProcessNodeConfig
 	RuntimeService service.RuntimeServiceInternal
+	// TenantGuard 租户归属鉴权守卫：校验发起人 initiator 属于目标租户（TenantMembershipChecker）。
+	// 由 Register 注入；未实现 TenantMembershipChecker 的宿主（含测试）跳过该成员校验。
+	TenantGuard service.TenantMembershipGuard
 
 	processKeyTmpl  el.Template
 	initiatorTmpl   el.Template
@@ -61,6 +64,7 @@ func (x *StartProcessNode) Category() string { return "bpm" }
 func (x *StartProcessNode) New() types.Node {
 	return &StartProcessNode{
 		RuntimeService: x.RuntimeService, // 从注册原型传播到 New 出的实例
+		TenantGuard:    x.TenantGuard,    // 同上
 	}
 }
 
@@ -139,7 +143,24 @@ func (x *StartProcessNode) OnMsg(ctx types.RuleContext, msg types.RuleMsg) {
 	}
 	evn := base.NodeUtils.GetEvnAndMetadata(ctx, msg)
 
+	// 租户解析：真实用户上下文以 ctx 内绑定的操作人租户为信任根（消息 metadata 可被调用方
+	// 任意伪造，不能作为越租户发起的依据）；仅系统/无操作人上下文（定时链、编辑器手动测试）
+	// 才退回 metadata.tenant_id 静态配置。
 	tenantID := metaValue(msg, constants.KeyTenantID)
+	if u := service.GetUserFromCtx(ctx.GetContext()); u != nil && !service.IsSystemActor(u) {
+		if u.TenantID == "" {
+			ctx.TellFailure(msg, fmt.Errorf(
+				"startProcess requires actor tenant; current actor %q has no tenant", u.UserID))
+			return
+		}
+		if tenantID != "" && tenantID != u.TenantID {
+			ctx.TellFailure(msg, fmt.Errorf(
+				"startProcess metadata.%s=%q mismatches actor tenant %q: %w",
+				constants.KeyTenantID, tenantID, u.TenantID, service.ErrPermissionDenied))
+			return
+		}
+		tenantID = u.TenantID
+	}
 	if tenantID == "" {
 		ctx.TellFailure(msg, fmt.Errorf(
 			"startProcess requires metadata.%s (scheduled chains carry it automatically; add it to debug metadata for manual testing)", constants.KeyTenantID))
@@ -153,6 +174,12 @@ func (x *StartProcessNode) OnMsg(ctx types.RuleContext, msg types.RuleMsg) {
 	initiator := x.initiatorTmpl.ExecuteAsString(evn)
 	if initiator == "" {
 		ctx.TellFailure(msg, fmt.Errorf("startProcess initiator resolves empty"))
+		return
+	}
+	// 发起人必须属于目标租户：阻断"以任意用户身份/任意租户"发起（身份伪造 + 越租户）。
+	if err := x.TenantGuard.EnsureUserInTenant(ctx.GetContext(), tenantID, initiator); err != nil {
+		ctx.TellFailure(msg, fmt.Errorf(
+			"startProcess initiator %q not in tenant %q: %w", initiator, tenantID, err))
 		return
 	}
 	var businessKey string
