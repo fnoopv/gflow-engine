@@ -2,8 +2,10 @@ package service
 
 import (
 	"context"
-	"github.com/rulego/gflow-engine/types/constants"
+	"fmt"
 	"time"
+
+	"github.com/rulego/gflow-engine/types/constants"
 )
 
 // User 用户实体
@@ -139,6 +141,34 @@ type IdentityService interface {
 type TenantMembershipChecker interface {
 	// IsUserInTenant 判断用户是否属于指定租户
 	IsUserInTenant(ctx context.Context, tenantID string, userID string) (bool, error)
+}
+
+// EnsureUserInTenant 校验 userID 属于 tenantID。宿主注入的 IdentityService 若同时实现
+// 可选接口 TenantMembershipChecker 则执行真实校验：不在租户内返回 ErrPermissionDenied，
+// 查询失败返回原始错误（fail-closed）。
+//
+// identity 为 nil、或未实现 TenantMembershipChecker 时返回 nil——引擎自身不含用户目录，
+// 无法判定；信任边界调用方（startProcess 发起、ccTask 自选抄送）应在未实现时自行权衡
+// 是否 fail-closed（本引擎对该类场景默认放行并告警，与转办/委派目标校验口径一致）。
+func EnsureUserInTenant(ctx context.Context, identity IdentityService, tenantID, userID string) error {
+	if identity == nil {
+		return nil
+	}
+	checker, ok := identity.(TenantMembershipChecker)
+	if !ok {
+		return nil
+	}
+	if userID == "" {
+		return fmt.Errorf("empty user id: %w", ErrValidation)
+	}
+	inTenant, err := checker.IsUserInTenant(ctx, tenantID, userID)
+	if err != nil {
+		return fmt.Errorf("failed to check user %q in tenant %q: %w", userID, tenantID, err)
+	}
+	if !inTenant {
+		return fmt.Errorf("user %q is not a member of tenant %q: %w", userID, tenantID, ErrPermissionDenied)
+	}
+	return nil
 }
 
 // GetUserFromCtx 从 ctx 取出 bindActor 绑定的操作人（*Actor）；未绑定返回 nil。
