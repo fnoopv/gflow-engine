@@ -45,9 +45,9 @@ type StartProcessNodeConfig struct {
 type StartProcessNode struct {
 	Config         StartProcessNodeConfig
 	RuntimeService service.RuntimeServiceInternal
-	// IdentityService 身份服务：校验发起人 initiator 属于目标租户（TenantMembershipChecker）。
+	// TenantGuard 租户归属鉴权守卫：校验发起人 initiator 属于目标租户（TenantMembershipChecker）。
 	// 由 Register 注入；未实现 TenantMembershipChecker 的宿主（含测试）跳过该成员校验。
-	IdentityService service.IdentityService
+	TenantGuard service.TenantMembershipGuard
 
 	processKeyTmpl  el.Template
 	initiatorTmpl   el.Template
@@ -63,8 +63,8 @@ func (x *StartProcessNode) Category() string { return "bpm" }
 
 func (x *StartProcessNode) New() types.Node {
 	return &StartProcessNode{
-		RuntimeService:  x.RuntimeService,  // 从注册原型传播到 New 出的实例
-		IdentityService: x.IdentityService, // 同上
+		RuntimeService: x.RuntimeService, // 从注册原型传播到 New 出的实例
+		TenantGuard:    x.TenantGuard,    // 同上
 	}
 }
 
@@ -177,7 +177,7 @@ func (x *StartProcessNode) OnMsg(ctx types.RuleContext, msg types.RuleMsg) {
 		return
 	}
 	// 发起人必须属于目标租户：阻断"以任意用户身份/任意租户"发起（身份伪造 + 越租户）。
-	if err := service.EnsureUserInTenant(ctx.GetContext(), x.IdentityService, tenantID, initiator); err != nil {
+	if err := x.TenantGuard.EnsureUserInTenant(ctx.GetContext(), tenantID, initiator); err != nil {
 		ctx.TellFailure(msg, fmt.Errorf(
 			"startProcess initiator %q not in tenant %q: %w", initiator, tenantID, err))
 		return

@@ -110,7 +110,7 @@ func Register(deps ComponentDeps) error {
 	// 注册抄送任务节点
 	ccTaskNode := &CCTaskNode{
 		TaskService:     taskService,
-		IdentityService: identityService,
+		TenantGuard:     service.NewTenantMembershipGuard(identityService),
 		OnCCTaskCreated: ccTaskCreatedListener,
 	}
 	if err := registerNode(ccTaskNode); err != nil {
@@ -153,7 +153,7 @@ func Register(deps ComponentDeps) error {
 	// 注册发起审批节点（startProcess）。规则链内以指定发起人启动 BPM 流程实例，
 	// 定时链经此实现"定时自动发起审批"。BPM 设计器面板不含此节点（硬编码清单），
 	// 仅经全局 Registry 出现在规则链编辑器组件面板。
-	if err := registerNode(&StartProcessNode{RuntimeService: runtimeService, IdentityService: identityService}); err != nil {
+	if err := registerNode(&StartProcessNode{RuntimeService: runtimeService, TenantGuard: service.NewTenantMembershipGuard(identityService)}); err != nil {
 		return err
 	}
 

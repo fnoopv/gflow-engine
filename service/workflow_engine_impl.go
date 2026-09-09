@@ -280,6 +280,14 @@ func (e *WorkflowEngineImpl) Start(ctx context.Context) error {
 				"Call Builder.SetIdentityService() with a real implementation.")
 	}
 
+	// 装配期探测租户归属校验能力：宿主 IdentityService 未实现 TenantMembershipChecker
+	// 时，转派目标/startProcess 发起人/ccTask 抄送人的跨租户校验整体跳过。默认记一条
+	// 启动告警；strict_tenant_membership_check=true 时拒绝启动（fail-fast）。
+	// 详见 operator_authz.go 的 TenantMembershipGuard.Validate。
+	if err := NewTenantMembershipGuard(e.identityService).Validate(e.config.StrictTenantMembershipCheck); err != nil {
+		return fmt.Errorf("workflow engine '%s': %w", e.name, err)
+	}
+
 	// 初始化Locker（如果未设置）
 	if e.locker == nil {
 		e.locker = lock.NewLocalLock()

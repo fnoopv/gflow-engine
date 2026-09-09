@@ -76,8 +76,8 @@ func registerStartProcessForTest(t *testing.T) *fakeStartProcessRuntime {
 	t.Helper()
 	startProcessRegisterOnce.Do(func() {
 		if err := rulego.Registry.Register(&StartProcessNode{
-			RuntimeService:  sharedStartProcessFake,
-			IdentityService: spTestIdentity,
+			RuntimeService: sharedStartProcessFake,
+			TenantGuard:    service.NewTenantMembershipGuard(spTestIdentity),
 		}); err != nil {
 			if !strings.Contains(err.Error(), "already exists") {
 				require.NoError(t, err)

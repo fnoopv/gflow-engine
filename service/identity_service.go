@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/rulego/gflow-engine/types/constants"
@@ -136,39 +135,20 @@ type IdentityService interface {
 
 // TenantMembershipChecker IdentityService 的可选扩展接口：宿主的 IdentityService
 // 实现若同时实现本方法（引擎以类型断言探测，IdentityService 本身不变），转办/委派/
-// 改派的目标用户将校验属于任务租户，阻断跨租户转派。未实现时引擎无法自行判定
-// （引擎不含用户目录），跳过校验并告警留痕。
+// 改派的目标用户、startProcess 发起人、ccTask 抄送人均校验属于对应租户，阻断跨租户
+// 转派/发起/抄送。未实现时引擎无法自行判定（引擎不含用户目录），跳过校验，缺口由
+// 装配期探测（operator_authz.go 的 TenantMembershipGuard.Validate）统一告警/严格拒绝。
 type TenantMembershipChecker interface {
 	// IsUserInTenant 判断用户是否属于指定租户
 	IsUserInTenant(ctx context.Context, tenantID string, userID string) (bool, error)
 }
 
-// EnsureUserInTenant 校验 userID 属于 tenantID。宿主注入的 IdentityService 若同时实现
-// 可选接口 TenantMembershipChecker 则执行真实校验：不在租户内返回 ErrPermissionDenied，
-// 查询失败返回原始错误（fail-closed）。
-//
-// identity 为 nil、或未实现 TenantMembershipChecker 时返回 nil——引擎自身不含用户目录，
-// 无法判定；信任边界调用方（startProcess 发起、ccTask 自选抄送）应在未实现时自行权衡
-// 是否 fail-closed（本引擎对该类场景默认放行并告警，与转办/委派目标校验口径一致）。
-func EnsureUserInTenant(ctx context.Context, identity IdentityService, tenantID, userID string) error {
-	if identity == nil {
-		return nil
-	}
-	checker, ok := identity.(TenantMembershipChecker)
-	if !ok {
-		return nil
-	}
-	if userID == "" {
-		return fmt.Errorf("empty user id: %w", ErrValidation)
-	}
-	inTenant, err := checker.IsUserInTenant(ctx, tenantID, userID)
-	if err != nil {
-		return fmt.Errorf("failed to check user %q in tenant %q: %w", userID, tenantID, err)
-	}
-	if !inTenant {
-		return fmt.Errorf("user %q is not a member of tenant %q: %w", userID, tenantID, ErrPermissionDenied)
-	}
-	return nil
+// TenantMembershipBatchChecker IdentityService 的可选批量扩展接口：宿主实现后，
+// ccTask 抄送名单等批量场景经 TenantMembershipGuard.CheckUsersInTenant 一次查询整批
+// 归属，避免逐人查询的 N+1。返回 map 的缺项按不在租户内处理（fail-closed）。
+type TenantMembershipBatchChecker interface {
+	// AreUsersInTenant 批量判断用户是否属于指定租户
+	AreUsersInTenant(ctx context.Context, tenantID string, userIDs []string) (map[string]bool, error)
 }
 
 // GetUserFromCtx 从 ctx 取出 bindActor 绑定的操作人（*Actor）；未绑定返回 nil。

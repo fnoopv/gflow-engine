@@ -46,9 +46,9 @@ type CCTaskNode struct {
 	Config         CCTaskNodeConfiguration
 	TaskService    service.TaskServiceInternal
 	CurrentNodeDef types.RuleNode
-	// IdentityService 身份服务：自选抄送人（selfSelect 业务变量）校验用户属于实例租户
-	// （TenantMembershipChecker）。由 Register 注入；未实现该接口的宿主跳过校验。
-	IdentityService service.IdentityService
+	// TenantGuard 租户归属鉴权守卫：自选抄送人（selfSelect 业务变量）校验用户属于实例
+	// 租户（TenantMembershipChecker）。由 Register 注入；未实现该接口的宿主跳过校验。
+	TenantGuard service.TenantMembershipGuard
 
 	// OnCCTaskCreated 由 Builder.SetCCTaskCreatedListener 经
 	// Register 注入。每条 CC 任务创建成功后调用一次。
@@ -67,7 +67,7 @@ func (x *CCTaskNode) New() types.Node {
 		TaskService: x.TaskService,
 		// 监听器从注册原型拷贝到每条链的执行实例，漏掉会导致 CC 事件被静默丢弃
 		OnCCTaskCreated: x.OnCCTaskCreated,
-		IdentityService: x.IdentityService,
+		TenantGuard:     x.TenantGuard,
 	}
 }
 
@@ -141,12 +141,14 @@ func (x *CCTaskNode) OnMsg(ctx types.RuleContext, msg types.RuleMsg) {
 		// 创建抄送任务（创建即完成，等同历史记录）
 		now := time.Now()
 		endReason := string(enums.EndReasonCC) // 标记为抄送任务，便于历史检索
+		// 抄送人必须属于实例租户：拦截业务变量/静态名单里夹带的跨租户 userId（越租户抄送）。
+		// 批量探测一次（宿主实现 TenantMembershipBatchChecker 时整单名单单次查询，无逐人 N+1）。
+		membership := x.TenantGuard.CheckUsersInTenant(ctx.GetContext(), tenantID, finalUserIds)
 		// 非阻塞语义：个别失败只计数继续循环，至少一个成功即推进下游（全部失败才 TellFailure）
 		failedCount := 0
 		firstErr := error(nil)
 		for _, userId := range finalUserIds {
-			// 抄送人必须属于实例租户：拦截业务变量/静态名单里夹带的跨租户 userId（越租户抄送）。
-			if err := service.EnsureUserInTenant(ctx.GetContext(), x.IdentityService, tenantID, userId); err != nil {
+			if err := membership[userId]; err != nil {
 				failedCount++
 				if firstErr == nil {
 					firstErr = fmt.Errorf("cc user %q not in tenant %q: %w", userId, tenantID, err)
