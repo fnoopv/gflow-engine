@@ -407,8 +407,7 @@ func TestExecuteNext_MissingInstanceReturnsNil(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// M4 回归：流程定义编译失败（initExecution 报错）时，不得留下"已建但永不驱动"的
-// active 孤儿实例——它卡死又无法续跑。修复顺序：先 initExecution 后落库。
+// initExecution 编译失败时不落库实例，避免留下无法驱动的 active 孤儿实例。
 func TestStartInstanceCore_InitFailureLeavesNoOrphanInstance(t *testing.T) {
 	q := rtImplTestDB(t)
 	instDAO := dao.NewInstanceDAOWithQuery(q)
@@ -422,7 +421,7 @@ func TestStartInstanceCore_InitFailureLeavesNoOrphanInstance(t *testing.T) {
 		ProcessKey:     "bad-def",
 		Name:           "bad def",
 		TenantID:       "t1",
-		DefinitionJSON: "{not-valid-json", // rulego 解析必然失败
+		DefinitionJSON: "{not-valid-json",
 	}
 
 	_, _, _, err := svc.startInstanceCore(context.Background(), procDef,

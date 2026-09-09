@@ -19,6 +19,7 @@ package components
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -82,10 +83,8 @@ type HttpCallNodeConfiguration struct {
 	// 且每一跳 30x 重定向的目标也会重新校验(CheckRedirect),未命中即 TellFailure。
 	// 命中白名单的主机视为设计者显式信任,跳过动态主机危险地址拦截。
 	AllowedHosts []string `json:"allowedHosts"`
-	// BlockPrivateNetworks 是否拦截 RFC1918 私有网段(10/8、172.16/12、192.168/16)。默认 false:
-	// BPM 流程常需调用内网服务,默认放行最不意外;显式置 true 才拦截。
-	// 回环(127.0.0.0/8、::1)、链路本地/云元数据(169.254.0.0/16)、未指定与组播地址
-	// 在 URL 主机含动态变量(${...})时始终拦截,不受本开关影响。
+	// BlockPrivateNetworks 已废弃。动态主机与重定向目标默认拦截 RFC1918 私有网段，
+	// 放行内网请改用 allowedHosts。
 	BlockPrivateNetworks bool `json:"blockPrivateNetworks"`
 
 	// 危险项：默认关闭，仅支持通过 DSL 配置
@@ -199,7 +198,7 @@ func (n *HttpCallNode) Init(_ types.Config, cfg types.Configuration) error {
 			if baseDial == nil {
 				baseDial = http.DefaultTransport.(*http.Transport).DialContext
 			}
-			blockPrivate := n.Config.BlockPrivateNetworks
+			blockPrivate := len(n.allowedHostSet) == 0 // 无白名单(动态主机)拦私有网段；有白名单仅兜底回环/元数据
 			tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 				host, port, err := net.SplitHostPort(addr)
 				if err != nil {
@@ -247,7 +246,7 @@ func (n *HttpCallNode) OnMsg(ctx types.RuleContext, msg types.RuleMsg) {
 	u, perr := url.Parse(endpoint)
 	if perr != nil || (u.Scheme != schemeHTTP && u.Scheme != schemeHTTPS) {
 		n.auditLog(msg, endpoint, 0, start, fmt.Errorf("scheme not allowed"))
-		ctx.TellFailure(msg, fmt.Errorf("httpCall url scheme not allowed: %q", endpoint))
+		ctx.TellFailure(msg, fmt.Errorf("httpCall url scheme not allowed: %q", redactEndpoint(endpoint)))
 		return
 	}
 	// 主机校验：白名单（如配置）+ 动态主机危险地址拦截
@@ -264,8 +263,9 @@ func (n *HttpCallNode) OnMsg(ctx types.RuleContext, msg types.RuleMsg) {
 
 	req, err := http.NewRequestWithContext(ctx.GetContext(), n.Config.Method, endpoint, bodyReader)
 	if err != nil {
-		n.auditLog(msg, endpoint, 0, start, fmt.Errorf("build http request: %w", err))
-		ctx.TellFailure(msg, fmt.Errorf("build http request: %w", err))
+		berr := redactEndpointInError(fmt.Errorf("build http request: %w", err), endpoint)
+		n.auditLog(msg, endpoint, 0, start, berr)
+		ctx.TellFailure(msg, berr)
 		return
 	}
 	for k, t := range n.headerTmpl {
@@ -274,9 +274,10 @@ func (n *HttpCallNode) OnMsg(ctx types.RuleContext, msg types.RuleMsg) {
 
 	resp, err := n.client.Do(req)
 	if err != nil {
-		err = fmt.Errorf("http call failed: %w", err)
-		n.auditLog(msg, endpoint, 0, start, err)
-		ctx.TellFailure(msg, err)
+		// 脱敏错误串中的 endpoint，避免 query 凭据落日志/终止 reason
+		lerr := redactEndpointInError(fmt.Errorf("http call failed: %w", err), endpoint)
+		n.auditLog(msg, endpoint, 0, start, lerr)
+		ctx.TellFailure(msg, lerr)
 		return
 	}
 	defer resp.Body.Close()
@@ -317,13 +318,13 @@ func (n *HttpCallNode) OnMsg(ctx types.RuleContext, msg types.RuleMsg) {
 	ctx.TellSuccess(msg)
 }
 
-// auditLog 结构化审计日志：线上排障主要靠它（实例终止 reason 只有一条）
+// auditLog 输出结构化审计日志；endpoint 经 redactEndpoint 脱敏。
 func (n *HttpCallNode) auditLog(msg types.RuleMsg, endpoint string, statusCode int, start time.Time, err error) {
 	fields := logrus.Fields{
 		"nodeType":   n.Type(),
 		"nodeId":     n.GetSelfId(),
 		"method":     n.Config.Method,
-		"endpoint":   endpoint,
+		"endpoint":   redactEndpoint(endpoint),
 		"instanceId": metaValue(msg, constants.KeyInstanceID),
 		"taskId":     metaValue(msg, constants.KeyTaskID),
 		"statusCode": statusCode,
@@ -336,6 +337,27 @@ func (n *HttpCallNode) auditLog(msg types.RuleMsg, endpoint string, statusCode i
 		return
 	}
 	logrus.WithFields(fields).Info("HttpCallNode execution")
+}
+
+// redactEndpoint 删除 URL 的 userinfo/query/fragment，仅保留 scheme://host/path；解析失败原样返回。
+func redactEndpoint(endpoint string) string {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return endpoint
+	}
+	u.User = nil
+	u.RawQuery = ""
+	u.ForceQuery = false
+	u.Fragment = ""
+	return u.String()
+}
+
+// redactEndpointInError 将错误串中的 endpoint 子串替换为脱敏形式，其余诊断信息原样保留。
+func redactEndpointInError(err error, endpoint string) error {
+	if err == nil {
+		return nil
+	}
+	return errors.New(strings.ReplaceAll(err.Error(), endpoint, redactEndpoint(endpoint)))
 }
 
 func (n *HttpCallNode) Destroy() {}
@@ -359,8 +381,7 @@ func (n *HttpCallNode) validateURLHost(ctx context.Context, u *url.URL) error {
 	return nil
 }
 
-// checkRedirect 重定向目标校验：与初始 URL 同一套防护（scheme + 白名单 + 动态主机危险地址），
-// 防止经 30x 跳转绕过。静态 URL 且未配置白名单时不做限制。
+// checkRedirect 校验 30x 跳转目标：scheme 白名单 + allowedHosts 白名单 + 危险地址拦截。
 func (n *HttpCallNode) checkRedirect(req *http.Request, _ []*http.Request) error {
 	u := req.URL
 	if u.Scheme != schemeHTTP && u.Scheme != schemeHTTPS {
@@ -372,10 +393,7 @@ func (n *HttpCallNode) checkRedirect(req *http.Request, _ []*http.Request) error
 		}
 		return nil
 	}
-	if n.hostIsDynamic {
-		return n.checkHostIPs(req.Context(), u.Hostname())
-	}
-	return nil
+	return n.checkHostIPs(req.Context(), u.Hostname())
 }
 
 // hostAllowed 判断 URL 主机是否命中白名单；白名单条目支持 "host" 或 "host:port"（不区分大小写）。
@@ -404,9 +422,9 @@ func (n *HttpCallNode) hostAllowedAddr(host, port string) bool {
 	return false
 }
 
-// checkHostIPs 解析主机并拦截 SSRF 危险地址。
-// IP 字面量直接判定；域名先 DNS 解析再逐个判定（任一命中即拒绝，解析失败按拒绝处理）。
-// ctx 用于 DNS 解析超时控制（3s）：慢 DNS 不能挂住工作流 goroutine。
+// checkHostIPs 解析主机并拦截 SSRF 危险地址（回环、链路本地/云元数据、组播及 RFC1918 私有网段）。
+// IP 字面量直接判定；域名先 DNS 解析再逐个校验，任一命中即拒绝、解析失败按拒绝处理。
+// ctx 用于 DNS 解析的 3 秒超时控制。
 func (n *HttpCallNode) checkHostIPs(ctx context.Context, host string) error {
 	if host == "" {
 		return fmt.Errorf("httpCall url host is empty")
@@ -426,7 +444,7 @@ func (n *HttpCallNode) checkHostIPs(ctx context.Context, host string) error {
 		}
 	}
 	for _, ip := range ips {
-		if isBlockedSSRFIP(ip, n.Config.BlockPrivateNetworks) {
+		if isBlockedSSRFIP(ip, true) {
 			return fmt.Errorf("httpCall url host %q resolves to blocked address %s", host, ip)
 		}
 	}

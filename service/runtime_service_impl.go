@@ -238,8 +238,7 @@ func (s *RuntimeServiceImpl) startInstanceCore(ctx context.Context, processDef *
 		instance.ParentID = &parentInstanceID
 	}
 
-	// 先装配执行引擎（校验/编译流程定义）再落库实例：定义非法时直接返回错误，
-	// 不留下"已建但永不驱动"的 active 孤儿实例（卡死且无法被驱动）。草稿无需驱动，跳过装配。
+	// 装配执行引擎（校验/编译流程定义）成功后落库，定义非法时不产生实例；草稿跳过装配。
 	var (
 		engine types.RuleEngine
 		derr   error

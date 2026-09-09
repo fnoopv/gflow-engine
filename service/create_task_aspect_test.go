@@ -13,7 +13,7 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// M9 回归替身：嵌入 nil 接口、只覆写被测路径实际调用的方法。
+// 测试替身：仅覆写被测路径调用的方法。
 // ---------------------------------------------------------------------------
 
 type endNodeCtx struct{ types.NodeCtx }
@@ -64,8 +64,7 @@ func (f *fakeEngine) GetTaskService() TaskService             { return f.taskSvc
 func (f *fakeEngine) GetRuntimeService() RuntimeService       { return f.rtSvc }
 func (f *fakeEngine) GetRuleChainExecutor() RuleChainExecutor { return nil }
 
-// M9 回归：end 节点去重锁服务异常时，仍需放行 end 收尾（完成实例归档），
-// 而非因"无锁值"被 After 跳过、把流程卡死在 active。
+// end 节点去重锁服务异常时，实例仍应完成归档。
 func TestTaskCreator_EndDedupLockErrorStillCompletesInstance(t *testing.T) {
 	q := rtImplTestDB(t)
 	rtSvc := &fakeRuntimeService{}
@@ -85,13 +84,12 @@ func TestTaskCreator_EndDedupLockErrorStillCompletesInstance(t *testing.T) {
 	msg := types.NewMsg(0, "wf", types.JSON, md, `{}`)
 	rctx := &fakeRuleContext{node: &endNodeCtx{}, selfID: "end1"}
 
-	// Before：锁服务异常时必须写入非空 KeyEndExecLock（保守放行 end 执行），
-	// 否则 After 的 `KeyEndExecLock == ""` 判定会跳过实例完成。
+	// 锁服务异常时 Before 仍须写入非空 KeyEndExecLock。
 	out := aspect.Before(rctx, msg, types.Success)
 	require.NotEmpty(t, out.GetMetadata().GetValue(constants.KeyEndExecLock),
 		"lock service error must still mark KeyEndExecLock")
 
-	// After：锁服务异常时实例仍应被完成归档。
+	// 锁服务异常时 After 仍应完成实例归档。
 	aspect.After(rctx, out, nil, types.Success)
 	require.Equal(t, "inst-end", rtSvc.completed, "instance must complete even when end-dedup lock errors")
 }
