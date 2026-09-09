@@ -127,8 +127,9 @@ func (aspect *TaskCreator) Before(ctx types.RuleContext, msg types.RuleMsg, rela
 	if ctx.Self().Type() == types.NodeTypeEnd {
 		lockVal, ok, err := aspect.endDedupLocker().TryLock(ctx.GetContext(), endNodeLockKey(instanceId), endDedupTTL)
 		if err != nil {
-			// 锁服务异常时保守放行（宁可重复执行也不能卡死流程）
-			logrus.WithError(err).Warnf("end-node dedup TryLock error, allow execution, instanceId: %s", instanceId)
+			// 锁服务异常时放行执行，并写入非空 KeyEndExecLock，保证 After 完成实例归档。
+			msg.GetMetadata().PutValue(constants.KeyEndExecLock, "end-dedup-unavailable")
+			logrus.WithError(err).Warnf("end-node dedup TryLock error, allow execution without dedup, instanceId: %s", instanceId)
 		} else if ok {
 			msg.GetMetadata().PutValue(constants.KeyEndExecLock, lockVal)
 		} else {

@@ -55,11 +55,17 @@ func (s *RuntimeServiceImpl) StartSubProcessInstance(ctx context.Context, parent
 	// 异步驱动同时避免子流程同步完成重入父 OnMsg。
 	s.subProcessParentNodes.Store(childID, parentNodeID)
 	if engine != nil {
-		// panic 不能打挂宿主进程；失败要留痕，否则子流程静默不启动无从排查
+		// OnMsg panic 兜底：终止子实例，避免子实例滞留。
 		go func() {
 			defer func() {
 				if r := recover(); r != nil {
 					logrus.Errorf("subProcess child %s OnMsg panicked: %v", childID, r)
+					// 用独立 context（调用方 ctx 可能已取消）以内部模式终止子实例。
+					actx := WithInternalCallingMode(context.Background())
+					reason := fmt.Sprintf("subProcess child panicked: %v", r)
+					if terr := s.TerminateProcessInstance(actx, SystemActor(), childID, reason); terr != nil {
+						logrus.WithError(terr).Errorf("failed to terminate panicked subProcess child %s", childID)
+					}
 				}
 			}()
 			engine.OnMsg(msg)

@@ -238,6 +238,18 @@ func (s *RuntimeServiceImpl) startInstanceCore(ctx context.Context, processDef *
 		instance.ParentID = &parentInstanceID
 	}
 
+	// 装配执行引擎（校验/编译流程定义）成功后落库，定义非法时不产生实例；草稿跳过装配。
+	var (
+		engine types.RuleEngine
+		derr   error
+	)
+	if !isDraft {
+		engine, derr = s.initExecution(processDef.TenantID, processDef.ID, processDef.DefinitionJSON)
+		if derr != nil {
+			return "", nil, types.RuleMsg{}, derr
+		}
+	}
+
 	// 保存流程实例
 	if err := s.instanceDAO.Create(ctx, instance); err != nil {
 		// 唯一约束兜底：并发同 businessKey 双发起时先查会双双通过，靠数据库
@@ -252,11 +264,6 @@ func (s *RuntimeServiceImpl) startInstanceCore(ctx context.Context, processDef *
 	// 草稿不驱动
 	if isDraft {
 		return instanceID, nil, types.RuleMsg{}, nil
-	}
-
-	engine, err := s.initExecution(processDef.TenantID, processDef.ID, processDef.DefinitionJSON)
-	if err != nil {
-		return "", nil, types.RuleMsg{}, err
 	}
 	md := types.NewMetadata()
 	md.PutValue(constants.KeyTenantID, processDef.TenantID)
