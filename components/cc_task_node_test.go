@@ -128,6 +128,9 @@ func (f *fakeCCTaskService) snapshot() []*model.WfTask {
 var (
 	ccTestTaskSvc  = &fakeCCTaskService{}
 	ccRegisterOnce sync.Once
+	// ccTestIdentity 注册进 ccTask 原型的租户身份源：默认全部"在租户内"，
+	// 跨租户过滤用例用 deny + reset。
+	ccTestIdentity = &fakeTenantChecker{}
 	// 链 ID 必须每用例唯一：rulego.New 对已存在的 ID 直接复用旧链，
 	// 用例会跑在别的节点配置上（时间戳在 Windows 粗粒度时钟下会撞车）
 	ccChainSeq atomic.Int64
@@ -137,7 +140,10 @@ var (
 func registerCCTaskForTest(t *testing.T) {
 	t.Helper()
 	ccRegisterOnce.Do(func() {
-		if err := rulego.Registry.Register(&CCTaskNode{TaskService: ccTestTaskSvc}); err != nil &&
+		if err := rulego.Registry.Register(&CCTaskNode{
+			TaskService:     ccTestTaskSvc,
+			IdentityService: ccTestIdentity,
+		}); err != nil &&
 			!strings.Contains(err.Error(), "already exists") {
 			t.Fatalf("register ccTask node: %v", err)
 		}
@@ -214,4 +220,15 @@ func TestCCTaskNode_OnMsg_StaticListWithoutSelfSelect(t *testing.T) {
 		`{"ccUserIds":["u-a","u-b"],"selfSelect":false}`,
 		`{}`)
 	require.ElementsMatch(t, []string{"u-a", "u-b"}, assignees)
+}
+
+// 自选/静态名单夹带跨租户 userId：被租户校验过滤，不创建越租户抄送任务。
+func TestCCTaskNode_OnMsg_SelfSelectFiltersCrossTenant(t *testing.T) {
+	ccTestIdentity.deny("u-self-2")
+	defer ccTestIdentity.reset()
+
+	assignees := runCCEngine(t,
+		`{"ccUserIds":["u-static"],"selfSelect":true}`,
+		`{"ccUserIds":["u-self-1","u-self-2"]}`)
+	require.Equal(t, []string{"u-self-1"}, assignees)
 }
