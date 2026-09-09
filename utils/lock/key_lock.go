@@ -99,43 +99,50 @@ func (l *LocalLock) Close() {
 
 // Lock 获取本地锁
 func (l *LocalLock) Lock(ctx context.Context, key string, expiration time.Duration) (string, error) {
-	value := generateLockValue()
-	expiredAt := time.Now().Add(expiration)
+	value, err := generateLockValue()
+	if err != nil {
+		return "", err
+	}
 
 	for {
-		if actual, loaded := l.locks.LoadOrStore(key, &lockInfo{
+		// expiredAt 必须每轮重试都重新计算（紧贴 LoadOrStore）：
+		//   - 等待期间消耗的时间不应从新锁有效期里扣；
+		//   - 用循环外只算一次的陈旧 expiredAt 装进 LoadOrStore，会让等久才抢到锁的
+		//     持有者拿到"已过期"的锁，被随后的 CAS 立即抢占 → 两个 goroutine 同时进临界区。
+		expiredAt := time.Now().Add(expiration)
+		actual, loaded := l.locks.LoadOrStore(key, &lockInfo{
 			value:     value,
 			expiredAt: expiredAt,
-		}); !loaded {
+		})
+		if !loaded {
 			// 成功获取锁
 			return value, nil
-		} else {
-			// 锁已存在，检查是否过期
-			info := actual.(*lockInfo)
-			info.mutex.RLock()
-			expired := time.Now().After(info.expiredAt)
-			info.mutex.RUnlock()
+		}
+		// 锁已存在，检查是否过期
+		info := actual.(*lockInfo)
+		info.mutex.RLock()
+		expired := time.Now().After(info.expiredAt)
+		info.mutex.RUnlock()
 
-			if expired {
-				// 锁已过期：CAS 直接换成新锁。不能换成 nil——并发 Lock
-				// 会 LoadOrStore 到 nil 并在类型断言处 panic。
-				// expiredAt 重新计算：等待期间消耗的时间不应从新锁有效期里扣。
-				if l.locks.CompareAndSwap(key, info, &lockInfo{
-					value:     value,
-					expiredAt: time.Now().Add(expiration),
-				}) {
-					return value, nil
-				}
-				continue
+		if expired {
+			// 锁已过期：CAS 直接换成新锁。不能换成 nil——并发 Lock
+			// 会 LoadOrStore 到 nil 并在类型断言处 panic。
+			// 用本轮回合刚算出的 expiredAt（见上），不另算也不复用陈旧值。
+			if l.locks.CompareAndSwap(key, info, &lockInfo{
+				value:     value,
+				expiredAt: expiredAt,
+			}) {
+				return value, nil
 			}
+			continue
+		}
 
-			// 锁未过期，等待一段时间后重试
-			select {
-			case <-ctx.Done():
-				return "", ctx.Err()
-			case <-time.After(10 * time.Millisecond):
-				continue
-			}
+		// 锁未过期，等待一段时间后重试
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(10 * time.Millisecond):
+			continue
 		}
 	}
 }
@@ -160,7 +167,10 @@ func (l *LocalLock) Unlock(ctx context.Context, key, value string) error {
 
 // TryLock 尝试获取本地锁（非阻塞）
 func (l *LocalLock) TryLock(ctx context.Context, key string, expiration time.Duration) (string, bool, error) {
-	value := generateLockValue()
+	value, err := generateLockValue()
+	if err != nil {
+		return "", false, err
+	}
 	expiredAt := time.Now().Add(expiration)
 
 	if actual, loaded := l.locks.LoadOrStore(key, &lockInfo{
@@ -243,11 +253,15 @@ func (l *LocalLock) cleanupExpiredLocks() {
 	}
 }
 
-// generateLockValue 生成锁的值
-func generateLockValue() string {
+// generateLockValue 生成锁的持有凭证值（随机 16 字节 → 32 位 hex）。
+// crypto/rand 失败意味着系统熵源异常、无法生成安全凭证——必须向上抛出而非静默返回
+// 确定性或全零值（否则所有持有者可能拿到相同 value，Unlock 的凭证校验随之失效）。
+func generateLockValue() (string, error) {
 	bytes := make([]byte, 16)
-	rand.Read(bytes)
-	return hex.EncodeToString(bytes)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", fmt.Errorf("generate lock value: %w", err)
+	}
+	return hex.EncodeToString(bytes), nil
 }
 
 // DefaultKeyLock 默认键锁实例（本地模式）
