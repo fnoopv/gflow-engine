@@ -407,6 +407,32 @@ func TestExecuteNext_MissingInstanceReturnsNil(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// initExecution 编译失败时不落库实例，避免留下无法驱动的 active 孤儿实例。
+func TestStartInstanceCore_InitFailureLeavesNoOrphanInstance(t *testing.T) {
+	q := rtImplTestDB(t)
+	instDAO := dao.NewInstanceDAOWithQuery(q)
+	svc := &RuntimeServiceImpl{
+		instanceDAO: instDAO,
+		idGenerator: &testSeqIDGen{},
+	}
+
+	procDef := &model.WfProcess{
+		ID:             "proc-bad-def",
+		ProcessKey:     "bad-def",
+		Name:           "bad def",
+		TenantID:       "t1",
+		DefinitionJSON: "{not-valid-json",
+	}
+
+	_, _, _, err := svc.startInstanceCore(context.Background(), procDef,
+		Actor{UserID: "u1", TenantID: "t1"}, "", nil, false, "")
+	require.Error(t, err)
+
+	cnt, cerr := q.WfInstance.WithContext(context.Background()).Count()
+	require.NoError(t, cerr)
+	require.Equal(t, int64(0), cnt, "initExecution 失败不应落库孤儿实例")
+}
+
 // 批量写变量走行锁事务：并发写不丢更新。
 func TestSetProcessInstanceVariables_ConcurrentMerge(t *testing.T) {
 	q := rtImplTestDB(t)
