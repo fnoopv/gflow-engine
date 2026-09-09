@@ -565,3 +565,80 @@ func TestHttpCall_AllowedHostsByName_LoopbackBlockedAtDial(t *testing.T) {
 	assert.Equal(t, types.Failure, rel)
 	assert.Contains(t, runErr.Error(), "blocked address")
 }
+
+// 静态主机经 30x 重定向到云元数据地址时被拦截。
+func TestHttpCall_StaticRedirectToMetadataBlocked(t *testing.T) {
+	registerHttpCallForTest(t)
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://169.254.169.254/latest/meta-data/", http.StatusFound)
+	}))
+	defer redirector.Close()
+
+	cfg := `{"url":"` + redirector.URL + `","method":"GET"}`
+	engine := buildHttpEngine(t, "t_http_static_redirect_meta", cfg)
+	_, rel, runErr := runChain(t, engine, types.NewMsgWithJsonData(`{}`))
+	require.Error(t, runErr, "static host redirect to cloud metadata must be blocked")
+	assert.Equal(t, types.Failure, rel)
+	assert.Contains(t, runErr.Error(), "blocked address")
+}
+
+// 静态主机经 30x 重定向到 RFC1918 内网地址时被拦截。
+func TestHttpCall_StaticRedirectToPrivateBlocked(t *testing.T) {
+	registerHttpCallForTest(t)
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://192.168.1.5/internal", http.StatusFound)
+	}))
+	defer redirector.Close()
+
+	cfg := `{"url":"` + redirector.URL + `","method":"GET"}`
+	engine := buildHttpEngine(t, "t_http_static_redirect_private", cfg)
+	_, rel, runErr := runChain(t, engine, types.NewMsgWithJsonData(`{}`))
+	require.Error(t, runErr, "static host redirect to private network must be blocked")
+	assert.Equal(t, types.Failure, rel)
+	assert.Contains(t, runErr.Error(), "blocked address")
+}
+
+// 动态主机解析到 RFC1918 私有网段时默认拦截。
+func TestHttpCall_DynamicHostPrivateBlocked(t *testing.T) {
+	registerHttpCallForTest(t)
+	cfg := `{"url":"${msg.url}","method":"GET"}`
+	engine := buildHttpEngine(t, "t_http_dyn_private", cfg)
+	msg := types.NewMsgWithJsonData(`{"url":"http://10.1.2.3/api"}`)
+
+	_, rel, runErr := runChain(t, engine, msg)
+	require.Error(t, runErr, "dynamic host resolving to private network must be blocked by default")
+	assert.Equal(t, types.Failure, rel)
+	assert.Contains(t, runErr.Error(), "blocked address")
+}
+
+// redactEndpoint 去除 userinfo/query/fragment。
+func TestRedactEndpoint(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"https://user:pass@host/path?token=secret&x=1", "https://host/path"},
+		{"http://host/path", "http://host/path"},
+		{"http://host?token=abc", "http://host"},
+		{"https://host/a/b?x=1#frag", "https://host/a/b"},
+	}
+	for _, c := range cases {
+		if got := redactEndpoint(c.in); got != c.want {
+			t.Errorf("redactEndpoint(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// redactEndpointInError 脱敏错误串中的 endpoint 子串。
+func TestRedactEndpointInError(t *testing.T) {
+	endpoint := "http://host/api?token=secret"
+	raw := fmt.Errorf("http call failed: Get %q: dial tcp 10.0.0.1:80: connect: connection refused", endpoint)
+
+	got := redactEndpointInError(raw, endpoint).Error()
+	if strings.Contains(got, "token=secret") {
+		t.Errorf("redactEndpointInError leaked query token: %q", got)
+	}
+	if !strings.Contains(got, "http://host/api") {
+		t.Errorf("redactEndpointInError should keep redacted endpoint path: %q", got)
+	}
+}

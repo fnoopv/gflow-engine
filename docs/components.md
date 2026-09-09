@@ -230,7 +230,7 @@ Call Activity。按 `targetId` 启动独立的子流程实例，父流程实例�
 | `outputMappings` | 空 | 按 `{from,to}` 显式映射，在输出模式之后最后执行；目标写 `metadata.k` 进消息元数据 |
 | `reservedKey` | `_http` | 完整响应的存放 key；存量 DSL 可自定义，设计器不暴露 |
 | `allowedHosts` | 空 | SSRF 主机白名单，支持 `host` / `host:port`，重定向逐跳校验 |
-| `blockPrivateNetworks` | `false` | 是否拦截 RFC1918 私有网段（BPM 常需调内网服务，默认放行） |
+| `blockPrivateNetworks` | `false` | **已废弃**：保留兼容旧 DSL，不再影响拦截；动态主机与重定向目标默认拦截 RFC1918 私有网段，内网调用需显式 `allowedHosts` |
 | `insecureSkipVerify` | `false` | 跳过 TLS 校验（危险项，设计器不暴露 UI） |
 | `proxyUrl` | | http/https 代理 |
 
@@ -240,11 +240,13 @@ Call Activity。按 `targetId` 启动独立的子流程实例，父流程实例�
 
 1. **scheme 白名单**：仅允许 `http`/`https`；
 2. **主机白名单**：配置 `allowedHosts` 后主机必须命中。按【字面 IP/host:port】信任时视为显式指定地址，完全放行（内网/回环回调可用）；按【域名】信任时拨号期仍保留回环/链路本地/元数据段的兜底拦截（防 DNS 劫持到云元数据）；
-3. **动态主机拦截**：仅当 URL 模板的**主机部分**含 `${...}` 时（`urlHostIsDynamic` 判定，路径含变量不算），对渲染结果做 DNS 解析并逐 IP 校验——回环（127/8、::1）、链路本地/云元数据（169.254/16、fe80::/10）、未指定、组播地址**始终拦截**；RFC1918 私有段仅在 `blockPrivateNetworks=true` 时拦截（避免误伤合法的内网服务调用）；解析失败按拒绝处理；
-4. **重定向逐跳校验**：`CheckRedirect` 对每个 30x 目标重复上述校验，防跳转绕过；
+3. **动态主机拦截**：仅当 URL 模板的**主机部分**含 `${...}` 时（`urlHostIsDynamic` 判定，路径含变量不算），对渲染结果做 DNS 解析并逐 IP 校验——回环（127/8、::1）、链路本地/云元数据（169.254/16、fe80::/10）、未指定、组播地址**始终拦截**；**RFC1918 私有段（10/8、172.16/12、192.168/16）默认拦截**——用户可控 URL 打内网是默认拒绝的，内网调用需把目标主机显式写入 `allowedHosts`（opt-in）；解析失败按拒绝处理；
+4. **重定向逐跳校验**：`CheckRedirect` 对每个 30x 目标重复上述校验（scheme + 白名单 + 危险地址拦截）。与初始 URL 是否「静态可信」解耦：即使初始主机是静态写死的，跳转目标也可能被诱导到回环/云元数据/内网，每一跳都过 `isBlockedSSRFIP`，防跳转绕过；
 5. **响应体上限 10MB**（`maxHTTPResponseBytes`），防超大响应打爆内存。
 
-DNS rebinding 防护：动态主机与按域名信任的白名单主机在【拨号时】二次解析并 pin 首个放行 IP 直连（校验与连接用同一地址，两次解析的翻转窗口被封死）；按字面 IP 白名单与纯静态 URL 不安装拨号守卫（DSL 作者显式写死的目标视为完全可信）。
+DNS rebinding 防护：动态主机与按域名信任的白名单主机在【拨号时】二次解析并 pin 首个放行 IP 直连（校验与连接用同一地址，两次解析的翻转窗口被封死，动态主机拨号期同样拦截私有段）；按字面 IP 白名单与纯静态 URL 不安装拨号守卫（DSL 作者显式写死的初始目标视为完全可信，仅其 30x 跳转目标仍受逐跳校验）。
+
+> **日志脱敏**：审计日志与错误串里的 endpoint 会去除 userinfo/query/fragment（`redactEndpoint`），query 中的 token/api_key 不会落入日志或实例终止 reason。
 
 ---
 

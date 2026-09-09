@@ -559,7 +559,7 @@ robfig/cron WithSeconds 约定）。**触发器是链级配置，不出现在画
 | `outputMappings` | array | 空 | 按 `[{from,to}]` 显式映射，在输出模式之后最后执行（优先级最高） |
 | `reservedKey` | string | `_http` | 非 object 响应（数组/纯文本）整体写入的 key，不污染表单字段 |
 | `allowedHosts` | array | 空 | SSRF 主机白名单，支持 `host` / `host:port` |
-| `blockPrivateNetworks` | bool | `false` | 是否拦截 RFC1918 私有网段 |
+| `blockPrivateNetworks` | bool | `false` | **已废弃**：保留兼容旧 DSL；动态主机与重定向目标默认拦截 RFC1918 私有网段，内网调用需 `allowedHosts` |
 | `insecureSkipVerify` | bool | `false` | 跳过 TLS 校验（危险项，设计器不暴露） |
 | `proxyUrl` | string | | http/https 代理 |
 
