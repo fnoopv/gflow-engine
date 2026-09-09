@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/rulego/gflow-engine/model"
+	"github.com/sirupsen/logrus"
 )
 
 // 本文件是引擎鉴权的唯一收口：租户隔离、属主、办理人、管理员/系统身份的全部
@@ -18,6 +19,7 @@ import (
 //   - requireTaskOperatorAuthorized    任务级变更＝办理人/管理员/系统
 //   - requireAdminIdentity             管理操作＝管理员/系统（改派/候选人池/定义变更）
 //   - requireInspectionTenant          巡检＝管理员/系统，且非系统须携带租户
+//   - TenantMembershipGuard            租户归属（可选 SPI）：发起人/抄送人/转派目标成员校验
 //   - isWorkflowAdmin / isAdminOrSystem / isInstanceStarterOrAdmin  谓词形态
 
 // ---------------------------------------------------------------------------
@@ -162,4 +164,120 @@ func ensureTenantAccess(ctx context.Context, resourceDesc, resourceTenantID stri
 		return nil
 	}
 	return fmt.Errorf("%s belongs to another tenant: %w", resourceDesc, ErrPermissionDenied)
+}
+
+// ---------------------------------------------------------------------------
+// 租户归属（可选 SPI）
+// ---------------------------------------------------------------------------
+
+// TenantMembershipGuard 租户归属鉴权守卫：包装宿主可选 SPI（TenantMembershipChecker /
+// TenantMembershipBatchChecker，接口定义见 identity_service.go），供 startProcess 发起人、
+// ccTask 抄送人、转派目标等信任边界校验"用户属于指定租户"。
+//
+// 引擎自身不含用户目录，宿主未实现可选接口时无法判定——守卫对 nil/未实现一律跳过
+// （放行），该缺口不在校验点逐次留痕，而由 Validate 在引擎装配期统一告警（或严格模式
+// 拒绝启动）。零值守卫 identity 为 nil，与显式构造的未实现守卫行为一致，可安全直用。
+type TenantMembershipGuard struct {
+	identity IdentityService
+}
+
+// NewTenantMembershipGuard 用宿主身份服务构造守卫。identity 允许 nil。
+func NewTenantMembershipGuard(identity IdentityService) TenantMembershipGuard {
+	return TenantMembershipGuard{identity: identity}
+}
+
+// EnsureUserInTenant 校验 userID 属于 tenantID：不在租户内返回 ErrPermissionDenied，
+// 查询失败返回原始错误（fail-closed），空 userID 返回 ErrValidation。
+// 守卫未挂 checker（identity 为 nil 或未实现可选接口）时跳过校验返回 nil。
+func (g TenantMembershipGuard) EnsureUserInTenant(ctx context.Context, tenantID, userID string) error {
+	if g.identity == nil {
+		return nil
+	}
+	checker, ok := g.identity.(TenantMembershipChecker)
+	if !ok {
+		return nil
+	}
+	if userID == "" {
+		return fmt.Errorf("empty user id: %w", ErrValidation)
+	}
+	inTenant, err := checker.IsUserInTenant(ctx, tenantID, userID)
+	if err != nil {
+		return fmt.Errorf("failed to check user %q in tenant %q: %w", userID, tenantID, err)
+	}
+	if !inTenant {
+		return fmt.Errorf("user %q is not a member of tenant %q: %w", userID, tenantID, ErrPermissionDenied)
+	}
+	return nil
+}
+
+// CheckUsersInTenant 批量校验 userIDs（去重）中每个用户是否属于 tenantID，逐项返回
+// 判定结果：值为 nil 表示在租户内（或守卫未挂 checker、跳过校验），非 nil 为拒绝原因。
+// 优先走宿主实现的 TenantMembershipBatchChecker 单次查询；批量查询失败降级为逐人
+// EnsureUserInTenant（保持与逐人模式一致的失败语义）。
+func (g TenantMembershipGuard) CheckUsersInTenant(ctx context.Context, tenantID string, userIDs []string) map[string]error {
+	result := make(map[string]error, len(userIDs))
+	if g.identity == nil {
+		return result
+	}
+	uniq := make([]string, 0, len(userIDs))
+	seen := make(map[string]struct{}, len(userIDs))
+	for _, id := range userIDs {
+		if _, dup := seen[id]; !dup {
+			seen[id] = struct{}{}
+			uniq = append(uniq, id)
+		}
+	}
+	batchIDs := make([]string, 0, len(uniq))
+	for _, id := range uniq {
+		if id == "" {
+			result[id] = fmt.Errorf("empty user id: %w", ErrValidation)
+			continue
+		}
+		batchIDs = append(batchIDs, id)
+	}
+	if batch, ok := g.identity.(TenantMembershipBatchChecker); ok && len(batchIDs) > 0 {
+		inTenant, err := batch.AreUsersInTenant(ctx, tenantID, batchIDs)
+		if err == nil {
+			for _, id := range batchIDs {
+				if !inTenant[id] {
+					result[id] = fmt.Errorf("user %q is not a member of tenant %q: %w", id, tenantID, ErrPermissionDenied)
+				}
+			}
+			return result
+		}
+		// 批量查询失败降级逐人：单点故障不放大全批，逐人路径各自 fail-closed
+		logrus.WithField("tenantID", tenantID).WithError(err).
+			Debug("batch tenant membership check failed; falling back to per-user checks")
+	}
+	for _, id := range batchIDs {
+		result[id] = g.EnsureUserInTenant(ctx, tenantID, id)
+	}
+	return result
+}
+
+// Validate 装配期探测守卫是否具备真实校验能力（宿主实现了 TenantMembershipChecker）。
+// 未实现时转派目标/startProcess 发起人/ccTask 抄送人的跨租户归属校验整体跳过——这是
+// 设计内的可选能力（引擎不含用户目录，运行期无法自行判定），但缺口必须显式暴露而非
+// 运行期逐次 debug 留痕：
+//   - strict=false：记一条 warn 启动告警（含影响面与启用方式），引擎照常启动；
+//   - strict=true：返回错误，宿主以启动失败换取硬保证（fail-fast）。
+//
+// 已实现时返回 nil 且不产生日志。单租户部署可忽略告警、不开严格模式。
+func (g TenantMembershipGuard) Validate(strict bool) error {
+	if g.identity != nil {
+		if _, ok := g.identity.(TenantMembershipChecker); ok {
+			return nil
+		}
+	}
+	const impact = "Cross-tenant membership checks for reassign/transfer/delegate/addSign targets, " +
+		"startProcess initiator and ccTask recipients are skipped."
+	if strict {
+		return fmt.Errorf("IdentityService does not implement TenantMembershipChecker "+
+			"(strict_tenant_membership_check=true). %s Implement it or disable the switch: %w",
+			impact, ErrValidation)
+	}
+	logrus.WithField("tenant_membership_check", "disabled").
+		Warn("TENANT_MEMBERSHIP_CHECK_DISABLED: IdentityService does not implement TenantMembershipChecker. " +
+			impact + " Implement TenantMembershipChecker to enable; single-tenant deployments may ignore this warning.")
+	return nil
 }

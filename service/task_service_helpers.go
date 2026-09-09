@@ -9,7 +9,6 @@ import (
 	"fmt"
 
 	"github.com/rulego/gflow-engine/model"
-	"github.com/sirupsen/logrus"
 )
 
 // getApprovalRuleString 读取审批规则字符串（nil 安全，空串兜底）。
@@ -57,29 +56,16 @@ func taskToHiTask(task *model.WfTask) *model.WfHiTask {
 	}
 }
 
-// ensureTargetUserInTenant 转办/委派/改派的目标用户租户归属校验。
-// 宿主注入的 IdentityService 若同时实现 TenantMembershipChecker 可选接口则执行校验，
-// 阻断"把任务转派给其他租户用户"；未实现时引擎无法自行判定（引擎不含用户目录），
-// 放行并记 debug 日志——是否允许跨租户转派由宿主实现该接口显式接管。
+// ensureTargetUserInTenant 转办/委派/改派/加签的目标用户租户归属校验。
+// 统一走租户归属鉴权守卫（未实现 TenantMembershipChecker 时跳过，缺口由装配期
+// TenantMembershipGuard.Validate 统一告警/严格模式拒绝），action 仅用于错误信息标注动作来源。
 func (s *TaskServiceImpl) ensureTargetUserInTenant(ctx context.Context, task *model.WfTask, userID, action string) error {
 	if s.workflowEngine == nil || task == nil {
 		return nil
 	}
-	checker, ok := s.workflowEngine.GetIdentityService().(TenantMembershipChecker)
-	if !ok {
-		logrus.WithFields(logrus.Fields{
-			"action":   action,
-			"taskID":   task.ID,
-			"targetID": userID,
-		}).Debug("IdentityService does not implement TenantMembershipChecker; target user tenant check skipped")
-		return nil
-	}
-	inTenant, err := checker.IsUserInTenant(ctx, task.TenantID, userID)
-	if err != nil {
-		return fmt.Errorf("failed to check target user tenant: %w", err)
-	}
-	if !inTenant {
-		return fmt.Errorf("target user %s not in task tenant %s: %w", userID, task.TenantID, ErrPermissionDenied)
+	guard := NewTenantMembershipGuard(s.workflowEngine.GetIdentityService())
+	if err := guard.EnsureUserInTenant(ctx, task.TenantID, userID); err != nil {
+		return fmt.Errorf("%s: %w", action, err)
 	}
 	return nil
 }
